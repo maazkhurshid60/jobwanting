@@ -382,8 +382,21 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
   }
 
   // Update list memberships if targetListIds is set
+  let listsBlocked = false;
   if (targetListIds !== null) {
     try {
+      /* Same all-stop as the import and the list-members endpoint: someone on
+         the master do-not-email list cannot be put back onto a mailing list by
+         editing them. Removals still apply — the point is to stop an address
+         re-entering a send, never to trap it where it is. */
+      const suppressedCheck = await db.execute({
+        sql: `SELECT 1 FROM contacts c
+                JOIN suppression_list s ON LOWER(s.email) = LOWER(c.email)
+               WHERE c.id = ? LIMIT 1`,
+        args: [id],
+      });
+      listsBlocked = suppressedCheck.rows.length > 0;
+
       if (targetListIds.length === 0) {
         await db.execute({
           sql: "DELETE FROM contact_list_members WHERE contact_id = ?",
@@ -396,18 +409,20 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
           args: [id, ...targetListIds],
         });
       }
-      for (const lid of targetListIds) {
-        await db.execute({
-          sql: "INSERT OR IGNORE INTO contact_list_members (list_id, contact_id) VALUES (?, ?)",
-          args: [lid, id],
-        });
+      if (!listsBlocked) {
+        for (const lid of targetListIds) {
+          await db.execute({
+            sql: "INSERT OR IGNORE INTO contact_list_members (list_id, contact_id) VALUES (?, ?)",
+            args: [lid, id],
+          });
+        }
       }
     } catch (err) {
       console.error("Failed to update list memberships in PATCH:", err);
     }
   }
 
-  return NextResponse.json({ success: true });
+  return NextResponse.json({ success: true, listsBlocked });
 }
 
 // DELETE /api/contacts — delete a contact by id.

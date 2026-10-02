@@ -110,7 +110,7 @@ function AddContactsModal({
   // Paste tab
   const [tab, setTab] = useState<"browse" | "paste">("browse");
   const [pastedEmails, setPastedEmails] = useState("");
-  const [pasteResult, setPasteResult] = useState<{ added: number; notFound: number; alreadyIn: number } | null>(null);
+  const [pasteResult, setPasteResult] = useState<{ added: number; notFound: number; alreadyIn: number; blocked: number } | null>(null);
   const [pasteLoading, setPasteLoading] = useState(false);
 
   const PAGE = 100;
@@ -248,11 +248,20 @@ function AddContactsModal({
   async function handleAdd() {
     if (selectedIds.size === 0 || adding) return;
     setAdding(true);
-    await fetch(`/api/lists/${listId}/members`, {
+    const res = await fetch(`/api/lists/${listId}/members`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ contactIds: Array.from(selectedIds) }),
     });
+    /* Anyone on the master do-not-email list is refused by the server. Say so:
+       selecting twelve people and getting ten is otherwise indistinguishable
+       from the add half-failing. */
+    const data = await res.json().catch(() => ({ added: 0, blocked: 0 }));
+    if (data.blocked > 0) {
+      toast.success(
+        `Added ${data.added}. ${data.blocked} blocked — on the do-not-email list.`,
+      );
+    }
     setAdding(false);
     onDone();
   }
@@ -276,14 +285,23 @@ function AddContactsModal({
       if (memberIds.has(id)) { alreadyIn++; continue; }
       toAdd.push(id);
     }
+    let blocked = 0;
+    let addedCount = 0;
     if (toAdd.length > 0) {
-      await fetch(`/api/lists/${listId}/members`, {
+      const res = await fetch(`/api/lists/${listId}/members`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ contactIds: toAdd }),
       });
+      /* Count what the server actually added, not what we asked it to add. The
+         do-not-email list is applied server-side, so reporting toAdd.length
+         here would tell you a suppressed address went onto the list when it
+         was refused — the precise case this gate exists to catch. */
+      const data = await res.json().catch(() => ({ added: toAdd.length, blocked: 0 }));
+      addedCount = data.added ?? toAdd.length;
+      blocked = data.blocked ?? 0;
     }
-    setPasteResult({ added: toAdd.length, notFound, alreadyIn });
+    setPasteResult({ added: addedCount, notFound, alreadyIn, blocked });
     setPasteLoading(false);
     if (toAdd.length > 0) onDone();
   }
@@ -548,7 +566,7 @@ function AddContactsModal({
               />
               {pasteResult && (
                 <div style={{ background: "var(--admin-surface-2)", border: "1px solid var(--admin-border)", borderRadius: "0.75rem", padding: "1rem 1.25rem", display: "flex", gap: "2rem" }}>
-                  {([["added", "var(--admin-success)", pasteResult.added], ["already in list", "var(--admin-text-muted)", pasteResult.alreadyIn], ["not found", "var(--admin-danger-text)", pasteResult.notFound]] as [string, string, number][]).map(([label, color, val]) => (
+                  {([["added", "var(--admin-success)", pasteResult.added], ["already in list", "var(--admin-text-muted)", pasteResult.alreadyIn], ["not found", "var(--admin-danger-text)", pasteResult.notFound], ["do-not-email", "var(--admin-danger-text)", pasteResult.blocked]] as [string, string, number][]).map(([label, color, val]) => (
                     <div key={label} style={{ textAlign: "center" }}>
                       <p style={{ fontSize: "1.4rem", fontWeight: 700, color, lineHeight: 1 }}>{val}</p>
                       <p style={{ fontSize: "0.68rem", color: "var(--admin-text-muted)", marginTop: "0.25rem" }}>{label}</p>

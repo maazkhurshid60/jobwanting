@@ -21,19 +21,22 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         (SELECT COUNT(*) FROM campaign_recipients cr WHERE cr.email = c.email) AS send_count,
         (SELECT MAX(sent_at) FROM campaign_recipients cr WHERE cr.email = c.email) AS last_sent`;
 
+  /* LOWER() on both sides, matching the send query in lib/campaignSend.ts
+     exactly. This is the preview of who a campaign will reach, so if the two
+     tests disagree the count shown here is not the count that gets mailed. */
   let sql: string;
   if (listId) {
     sql = `${select}
            FROM contacts c
            JOIN contact_list_members m ON c.id = m.contact_id
            WHERE m.list_id = ? AND c.status = 'active'
-           AND c.email NOT IN (SELECT email FROM suppression_list)`;
+           AND LOWER(c.email) NOT IN (SELECT LOWER(email) FROM suppression_list)`;
     args.push(listId);
   } else {
     sql = `${select}
            FROM contacts c
            WHERE c.status = 'active'
-           AND c.email NOT IN (SELECT email FROM suppression_list)`;
+           AND LOWER(c.email) NOT IN (SELECT LOWER(email) FROM suppression_list)`;
   }
 
   if (excludeRecentDays && excludeRecentDays > 0) {

@@ -174,7 +174,16 @@ export async function sendCampaignNow(params: CampaignSendParams): Promise<Campa
     // a failed sync must never block a send
   }
 
-  // Build targeting query
+  /* Build targeting query.
+   *
+   * The suppression test is LOWER() on both sides. SQLite compares TEXT with
+   * case sensitivity, so the plain `email NOT IN (SELECT email ...)` this used
+   * to be would mail "Pat@Stop.com" while "pat@stop.com" sat on the
+   * do-not-email list. Every write path lowercases today, so that needs a row
+   * that predates the normalization or arrived from an import that bypassed
+   * it — which is exactly the kind of row an uploaded list is made of. This is
+   * the last gate before an email leaves, and it is the one that must not have
+   * a way past it. */
   let sql: string;
   const args: (string | number)[] = [];
 
@@ -183,11 +192,11 @@ export async function sendCampaignNow(params: CampaignSendParams): Promise<Campa
            FROM contacts c
            JOIN contact_list_members m ON c.id = m.contact_id
            WHERE m.list_id = ? AND c.status = 'active'
-           AND c.email NOT IN (SELECT email FROM suppression_list)`;
+           AND LOWER(c.email) NOT IN (SELECT LOWER(email) FROM suppression_list)`;
     args.push(listId);
   } else {
     sql = `SELECT id, email, name, title, company FROM contacts WHERE status = 'active'
-           AND email NOT IN (SELECT email FROM suppression_list)`;
+           AND LOWER(email) NOT IN (SELECT LOWER(email) FROM suppression_list)`;
   }
 
   if (excludeRecentDays && excludeRecentDays > 0) {

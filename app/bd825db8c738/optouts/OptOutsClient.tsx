@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
-import { Search, UserCheck, AlertOctagon, RefreshCw, Download } from "lucide-react";
+import { Search, UserCheck, AlertOctagon, RefreshCw, Download, Upload } from "lucide-react";
 import { Pagination } from "../Toast";
 
 interface SuppressedContact {
@@ -9,6 +9,31 @@ interface SuppressedContact {
   reason: string;
   created_at: number;
 }
+
+/* Pull every address out of a file without being told which column holds them.
+   A do-not-email list arrives in whatever shape the sender had it — one
+   address per line, a single CSV column, or a full export with twenty columns
+   and a header row — and asking which column is "the email one" is a mapping
+   step that can be got wrong on the one list that must never be mailed. The
+   delimiters are everything an address cannot contain, so quotes, commas,
+   semicolons and angle brackets around "Name <a@b.com>" all fall away. */
+function extractEmails(text: string): string[] {
+  const matches = text.match(/[^\s@,;:"'<>()[\]]+@[^\s@,;:"'<>()[\]]+\.[A-Za-z]{2,}/g) ?? [];
+  return [...new Set(matches.map((m) => m.trim().toLowerCase().replace(/[.,;:]+$/, "")))];
+}
+
+const UPLOAD_REASONS = [
+  { value: "do_not_email", label: "Do not email" },
+  { value: "unsubscribed", label: "Unsubscribed" },
+  { value: "spam_complaint", label: "Spam complaint" },
+  { value: "bounced", label: "Bounced" },
+  { value: "invalid", label: "Invalid address" },
+];
+
+/* Addresses per request. The server writes in its own chunks; this one is
+   about the request itself, which on Vercel is capped at a few megabytes —
+   a 40,000-address list sent whole is a single request that fails whole. */
+const UPLOAD_CHUNK = 2000;
 
 const cardStyle = {
   background: "var(--admin-surface)",
@@ -45,6 +70,9 @@ export default function OptOutsClient() {
   const [success, setSuccess] = useState("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  const [uploading, setUploading] = useState(false);
+  const [uploadReason, setUploadReason] = useState("do_not_email");
+  const [exportView, setExportView] = useState("all");
   const PER_PAGE = 30;
 
   async function fetchOptouts() {
@@ -99,8 +127,81 @@ export default function OptOutsClient() {
 
   function triggerDownload() {
     const a = document.createElement("a");
-    a.href = "/api/export/suppression";
+    a.href = `/api/export/suppression?view=${exportView}`;
     a.click();
+  }
+
+  function openUpload() {
+    setError("");
+    setSuccess("");
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".csv,.txt,text/csv,text/plain";
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (file) handleUpload(file);
+    };
+    input.click();
+  }
+
+  async function handleUpload(file: File) {
+    try {
+      setError("");
+      setSuccess("");
+
+      const emails = extractEmails(await file.text());
+      if (emails.length === 0) {
+        setError(`No email addresses found in ${file.name}.`);
+        return;
+      }
+
+      const label = UPLOAD_REASONS.find((r) => r.value === uploadReason)?.label ?? uploadReason;
+      if (
+        !confirm(
+          `Add ${emails.length.toLocaleString()} address${emails.length === 1 ? "" : "es"} from ${file.name} to the do-not-email list as "${label}"?\n\n` +
+            `They will be blocked from every future campaign. Addresses already on the list keep their original reason and date.`,
+        )
+      ) return;
+
+      setUploading(true);
+
+      let added = 0;
+      let alreadyListed = 0;
+      let invalid = 0;
+
+      for (let i = 0; i < emails.length; i += UPLOAD_CHUNK) {
+        const res = await fetch("/api/contacts/suppressed", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            emails: emails.slice(i, i + UPLOAD_CHUNK),
+            reason: uploadReason,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Upload failed");
+        added += data.added ?? 0;
+        alreadyListed += data.alreadyListed ?? 0;
+        invalid += data.invalid ?? 0;
+      }
+
+      setSuccess(
+        `${file.name}: ${added.toLocaleString()} added to the do-not-email list` +
+          (alreadyListed ? `, ${alreadyListed.toLocaleString()} already on it` : "") +
+          (invalid ? `, ${invalid.toLocaleString()} skipped as unreadable` : "") +
+          /* Bounced and invalid rows live on the Bounced page, so say where
+             they went rather than letting the admin think the upload was
+             silently dropped when the table below doesn't grow. */
+          (uploadReason === "bounced" || uploadReason === "invalid"
+            ? ". They appear on the Bounced page, not this one."
+            : "."),
+      );
+      fetchOptouts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to upload the list");
+    } finally {
+      setUploading(false);
+    }
   }
 
   return (
@@ -120,10 +221,13 @@ export default function OptOutsClient() {
         </div>
 
         <div style={cardStyle} className="flex flex-col justify-center gap-1 sm:col-span-2">
-          <p className="text-xs font-medium text-(--admin-text-muted)">Suppression List Purpose</p>
+          <p className="text-xs font-medium text-(--admin-text-muted)">Master Do-Not-Email List</p>
           <p className="text-xs mt-1 leading-relaxed text-(--admin-text-faint)">
-            Contacts are added to this list when they unsubscribe, bounce, or are marked invalid.
-            The system strictly blocks outbound campaign sends to any email matching these records to guarantee spam compliance and sender domain health.
+            Addresses land here when they unsubscribe, hard-bounce, complain, or are marked invalid, and every
+            campaign send is filtered against the whole list — nothing on it can be mailed again.
+            Use <strong>Upload List</strong> to add addresses in bulk from a CSV or TXT file, and <strong>Export List</strong>
+            to download the complete list, bounces included. The table below shows opt-outs only; bounced and
+            invalid addresses have their own page.
           </p>
         </div>
       </div>
@@ -152,6 +256,60 @@ export default function OptOutsClient() {
                 }}
               />
             </div>
+
+            {/* The reason sits next to the upload button rather than inside a
+                modal: it is the one thing about an uploaded list that can't be
+                inferred from the file, and it decides which screen the rows
+                land on. */}
+            <select
+              value={uploadReason}
+              onChange={(e) => setUploadReason(e.target.value)}
+              disabled={uploading}
+              title="Reason recorded against every address in the uploaded file"
+              style={{
+                ...inputStyle,
+                padding: "0.5rem 0.75rem",
+                fontSize: "0.8rem",
+                width: "auto",
+                cursor: "pointer",
+              }}
+            >
+              {UPLOAD_REASONS.map((r) => (
+                <option key={r.value} value={r.value}>{r.label}</option>
+              ))}
+            </select>
+
+            <button
+              onClick={openUpload}
+              disabled={uploading}
+              title="Upload a CSV or TXT file of addresses to never email"
+              className="flex items-center gap-2 px-4 py-2 rounded-full text-xs font-bold transition-all hover:scale-[1.02] disabled:opacity-60"
+              style={{ background: "var(--admin-danger-soft)", color: "var(--admin-danger-text)", border: "1px solid var(--admin-danger-soft)", fontFamily: "var(--font-heading)" }}
+            >
+              <Upload size={13} /> {uploading ? "Uploading..." : "Upload List"}
+            </button>
+
+            {/* The client thinks of this as two lists — "the unsubscribes and
+                the bouncing ones" — so the download can be either half or the
+                whole thing. The halves use the same bounce test the Opt-Outs
+                and Bounced pages split on, so the two files add back up to the
+                master list with nothing double-counted. */}
+            <select
+              value={exportView}
+              onChange={(e) => setExportView(e.target.value)}
+              title="How much of the do-not-email list to download"
+              style={{
+                ...inputStyle,
+                padding: "0.5rem 0.75rem",
+                fontSize: "0.8rem",
+                width: "auto",
+                cursor: "pointer",
+              }}
+            >
+              <option value="all">Whole list</option>
+              <option value="optouts">Opt-outs only</option>
+              <option value="bounced">Bounced only</option>
+            </select>
 
             <button
               onClick={triggerDownload}
