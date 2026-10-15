@@ -47,16 +47,31 @@ approved — so it looks like the panel is broken rather than misconfigured.
 
 ## 3. Scheduled sends
 
-`vercel.json` runs `/api/scheduler/run` every five minutes. The worker
-authenticates the `Authorization: Bearer $CRON_SECRET` header that Vercel Cron
-sends, and takes one campaign per tick because sending is sequential.
+`.github/workflows/scheduler.yml` POSTs to `/api/scheduler/run` every five
+minutes. The worker authenticates the `Authorization: Bearer $CRON_SECRET`
+header and takes one campaign per tick because sending is sequential.
 
-**Check your plan before relying on this.** Vercel's Hobby tier restricts cron
-frequency (daily, not every five minutes) and caps function execution at 60
-seconds regardless of the `maxDuration = 300` the route asks for. The route is
-written to survive being killed part-way — it reaps its own stale claims after
-15 minutes — but on a daily cron a queued campaign waits up to a day to go out.
-Five-minute ticks need a paid plan.
+**This used to be a `crons` block in `vercel.json`, and that is why nothing
+deployed between 13 September and 16 October 2026.** Vercel's Hobby plan allows
+daily crons only, and it does not warn about a more frequent one — it rejects
+the entire deployment. Every push in that window was refused before it built,
+so production stayed on the 11 September build for a month while the repo moved
+on. If the project ever goes to Pro, the schedule can move back into
+`vercel.json` and this workflow can be deleted.
+
+The workflow needs two repository secrets, under Settings → Secrets and
+variables → Actions:
+
+| Secret | Value |
+| --- | --- |
+| `CRON_SECRET` | Identical to the `CRON_SECRET` environment variable in Vercel. If they drift, every tick gets a 401 and the run fails loudly, which is intended — a silently unauthorised tick is indistinguishable from "nothing was due". |
+| `APP_URL` | The deployment origin, no trailing slash, e.g. `https://jobwanting.vercel.app`. |
+
+Hobby also caps function execution at 60 seconds regardless of the
+`maxDuration = 300` the route asks for. The route is written to survive being
+killed part-way: it reaps its own stale claims after 15 minutes, and a late or
+failed tick sends late rather than skipping, because each run claims whatever
+is due at the moment it runs.
 
 To trigger a run by hand:
 

@@ -1,0 +1,62 @@
+# Ticks the campaign scheduler every five minutes.
+#
+# This lived in vercel.json until Oct 2026. Vercel's Hobby plan only allows
+# daily crons and rejects the whole deployment when it sees a more frequent
+# one, so every deploy from 13 Sep to 16 Oct failed and production sat on a
+# month-old build. The schedule matters: a drip campaign sends one batch per
+# tick, so a daily cron would turn a drip into one batch a day.
+#
+# The worker authenticates the bearer token itself and is in the middleware's
+# public path list for that reason. It claims whatever is due at the moment it
+# runs, so a late tick sends late rather than skipping — which is what makes
+# GitHub's scheduler acceptable here despite it running minutes behind under
+# load.
+#
+# Needs two repository secrets: CRON_SECRET (identical to the Vercel env var
+# of the same name) and APP_URL (the deployment origin, no trailing slash).
+name: Campaign scheduler
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  # So a queued campaign can be pushed out by hand from the Actions tab
+  # without waiting for the next tick.
+  workflow_dispatch:
+
+# A tick that overruns must not have a second one start alongside it: the
+# worker claims rows, but two overlapping runs still mean two concurrent
+# sends against the same Brevo account.
+concurrency:
+  group: campaign-scheduler
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger scheduler
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          APP_URL: ${{ secrets.APP_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CRON_SECRET:-}" ] || [ -z "${APP_URL:-}" ]; then
+            echo "CRON_SECRET and APP_URL repository secrets are not set." >&2
+            exit 1
+          fi
+          # --max-time well under the job timeout: a tick that hangs should
+          # fail this run and let the next one claim the work, not wedge the
+          # concurrency group.
+          code=$(curl -sS -X POST \
+            --max-time 300 \
+            -o response.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${APP_URL}/api/scheduler/run")
+          echo "HTTP ${code}"
+          cat response.json || true
+          echo
+          # 401 means the secret drifted from the one in Vercel; failing loudly
+          # is the point, since a silently unauthorised tick looks identical to
+          # "nothing was due".
+          test "${code}" = "200"
