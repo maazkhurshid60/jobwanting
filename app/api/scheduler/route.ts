@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 import { zonedWallTimeToUtcEpoch, isRepeatEvery, REPEAT_INTERVAL_DAYS } from "@/lib/schedule";
+import { resolveSender } from "@/lib/brevo";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -52,6 +53,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     timezone?: string;      // IANA tz, e.g. "America/New_York"
     batchIntervalMinutes?: number | null; // null/0 = send once, don't drip
     repeatEvery?: string | null;          // 'daily' | 'weekly' | 'monthly'
+    senderEmail?: string | null;          // null = the configured default
   };
 
   if (!b.subject?.trim() || !b.body?.trim()) {
@@ -98,6 +100,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     batchInterval = Math.max(5, Math.floor(Number(b.batchIntervalMinutes)));
   }
 
+  /* Confirm the sender at schedule time rather than at send time. A campaign
+     set for next Tuesday that names an address Brevo will refuse should fail
+     now, while someone is looking at the form, not silently at 09:00 on the
+     day. It is re-read from the row when the worker runs, so a sender removed
+     from Brevo in between still fails then; this only stops the obvious case
+     early. */
+  const resolved = await resolveSender(b.senderEmail);
+  if (!resolved.ok) {
+    return NextResponse.json({ error: resolved.error }, { status: resolved.status });
+  }
+  const sender = resolved.sender;
+
   const listId = b.listId ?? null;
   const totalTarget = await audienceSize(listId);
 
@@ -105,8 +119,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     sql: `INSERT INTO scheduled_campaigns
             (subject, body, is_html, list_id, exclude_recent_days, daily_limit,
              send_offset, reply_to, attach_postcard, scheduled_at, timezone, status,
-             batch_interval_minutes, total_target, repeat_every)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+             batch_interval_minutes, total_target, repeat_every,
+             sender_email, sender_name)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
     args: [
       b.subject.trim(),
       b.body,
@@ -122,6 +137,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       batchInterval,
       totalTarget,
       repeatEvery,
+      sender?.email ?? null,
+      sender?.name ?? null,
     ],
   });
 

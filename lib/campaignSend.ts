@@ -110,6 +110,12 @@ export interface CampaignSendParams {
   replyTo?: string | null;
   attachPostcard?: boolean;
   customAttachment?: { name: string; content: string } | null;
+  /* Which verified sender to send as. Null or absent uses the configured
+     default, which is what every campaign sent before the composer offered a
+     choice, so existing scheduled rows keep their old behaviour. Validated
+     against Brevo's sender list by the caller, not here. */
+  senderEmail?: string | null;
+  senderName?: string | null;
 }
 
 export interface CampaignSendResult {
@@ -149,8 +155,14 @@ export function buildAttachments(
 export async function sendCampaignNow(params: CampaignSendParams): Promise<CampaignSendResult> {
   const {
     subject, body, isHtml, listId, excludeRecentDays, dailyLimit, offset,
-    replyTo, attachPostcard, customAttachment,
+    replyTo, attachPostcard, customAttachment, senderEmail, senderName,
   } = params;
+
+  /* Undefined rather than a half-filled object when no sender was chosen, so
+     sendCampaignEmail falls through to BREVO_SENDER_EMAIL as before. */
+  const sender = senderEmail
+    ? { email: senderEmail, name: senderName ?? undefined }
+    : undefined;
 
   if (!subject?.trim() || !body?.trim()) {
     return { ok: false, recipients: 0, failed: 0, error: "Subject and body are required" };
@@ -246,6 +258,7 @@ export async function sendCampaignNow(params: CampaignSendParams): Promise<Campa
       subject,
       htmlContent: body,
       replyTo: replyTo ?? undefined,
+      sender,
       attachments: attachmentsOption,
       recipients: contacts.map((c) => {
         const personalizedText = personalize(body, c);
@@ -301,6 +314,9 @@ export async function sendCampaignNow(params: CampaignSendParams): Promise<Campa
         subject: verifierSubject,
         htmlContent: wrapInHtmlTemplate(verifierBodyText, VERIFIER_EMAILS[0], 0, !!isHtml),
         replyTo: replyTo ?? undefined,
+        /* The verifier copy is meant to be what the recipients got, so it
+           goes out as the same sender rather than the default. */
+        sender,
         attachments: attachmentsOption,
         recipients: VERIFIER_EMAILS.map((e) => ({
           email: e,

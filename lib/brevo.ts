@@ -25,6 +25,23 @@ export interface SendEmailOptions {
   recipients: Recipient[];
   replyTo?: string;
   attachments?: Attachment[];
+  /* Which verified sender the mail goes out as. Omitted falls back to
+     BREVO_SENDER_EMAIL, which is what every send used before the account
+     had more than one verified domain. Callers must validate this against
+     listVerifiedSenders() rather than trusting it from a request body:
+     Brevo would reject an unverified address anyway, but it would do so
+     once per recipient, after the campaign had started. */
+  sender?: { email: string; name?: string };
+}
+
+export interface BrevoSender {
+  id: number;
+  name: string;
+  email: string;
+  /** Brevo's "activated" flag. The API exposes no separate verified field,
+      and a sender that has not completed verification comes back deactivated,
+      so this is the usable/not-usable signal. */
+  active: boolean;
 }
 
 export interface SendResult {
@@ -165,14 +182,93 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
 }
 
 /**
+ * The senders this account may send as, newest Brevo state rather than a list
+ * kept here.
+ *
+ * Hardcoding the addresses would have been less code, but the list is edited
+ * in Brevo, not in this repo: a domain added there would stay invisible to the
+ * dashboard, and one removed or left to lapse would stay on offer and fail at
+ * send time. Reading it live means the dropdown cannot drift from the account.
+ *
+ * Deactivated senders are filtered out. A sender that has not completed domain
+ * verification comes back deactivated, and offering one guarantees a campaign
+ * that fails for every recipient.
+ *
+ * Throws rather than returning [] on a bad key or an unreachable Brevo: an
+ * empty list and a broken connection look identical to a dropdown, and
+ * silently showing "no senders" would read as an account problem.
+ */
+export async function listVerifiedSenders(): Promise<BrevoSender[]> {
+  const res = await fetchWithRetry(`${BREVO_API_URL}/senders`, {
+    method: "GET",
+    headers: { "api-key": getApiKey(), Accept: "application/json" },
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    throw new Error(
+      res.status === 401
+        ? "Brevo rejected the API key while listing senders."
+        : `Brevo returned ${res.status} while listing senders.`,
+    );
+  }
+
+  const data = (await res.json()) as { senders?: BrevoSender[] };
+  return (data.senders ?? []).filter((s) => s.active !== false);
+}
+
+export type SenderResolution =
+  | { ok: true; sender: { email: string; name?: string } | undefined }
+  | { ok: false; status: 400 | 502; error: string };
+
+/**
+ * Turns a sender address from a request body into one Brevo has confirmed,
+ * or into the reason it can't.
+ *
+ * Shared by the send route and the scheduler route because both accept the
+ * same field and both must apply the same check: an address off a form is not
+ * evidence of anything, and an unverified one fails per recipient rather than
+ * up front, so a campaign to four hundred contacts would make four hundred
+ * failing calls and report "0 sent" with no usable reason. One lookup here
+ * turns that into a single 400 before anything is sent or stored.
+ *
+ * No address is not an error. It means "use the configured default", which is
+ * how every campaign behaved before the composer offered a choice.
+ */
+export async function resolveSender(
+  email?: string | null,
+): Promise<SenderResolution> {
+  if (!email) return { ok: true, sender: undefined };
+
+  let allowed: BrevoSender[];
+  try {
+    allowed = await listVerifiedSenders();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Could not reach Brevo";
+    return { ok: false, status: 502, error: `Could not confirm the sender address: ${message}` };
+  }
+
+  const match = allowed.find((s) => s.email.toLowerCase() === email.toLowerCase());
+  if (!match) {
+    return {
+      ok: false,
+      status: 400,
+      error: `${email} is not a verified sender on this Brevo account.`,
+    };
+  }
+  return { ok: true, sender: { email: match.email, name: match.name } };
+}
+
+/**
  * Sends a transactional email to multiple recipients via Brevo API.
  * Each recipient gets an individual email (BCC-safe — no address leaking).
  */
 export async function sendCampaignEmail(
   opts: SendEmailOptions
 ): Promise<SendResult> {
-  const senderEmail = process.env.BREVO_SENDER_EMAIL;
-  const senderName = process.env.BREVO_SENDER_NAME ?? "Patrick Novick";
+  const senderEmail = opts.sender?.email ?? process.env.BREVO_SENDER_EMAIL;
+  const senderName =
+    opts.sender?.name ?? process.env.BREVO_SENDER_NAME ?? "Patrick Novick";
   const replyToEmail = opts.replyTo ?? process.env.BREVO_REPLY_TO_EMAIL ?? "patrick@metroassoc.com";
 
   if (!senderEmail) throw new Error("BREVO_SENDER_EMAIL is not set");

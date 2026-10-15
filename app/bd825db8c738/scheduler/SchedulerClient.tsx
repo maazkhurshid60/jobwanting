@@ -87,6 +87,10 @@ export default function SchedulerClient({
   const [excludeRecent, setExcludeRecent] = useState(false);
   const [excludeDays, setExcludeDays] = useState(30);
   const [replyTo, setReplyTo] = useState("");
+  /* Verified Brevo senders, as in the campaign composer. Empty string means
+     the configured default, which is what every existing schedule uses. */
+  const [senders, setSenders] = useState<{ email: string; name: string }[]>([]);
+  const [senderEmail, setSenderEmail] = useState("");
   const [templateId, setTemplateId] = useState<number | "">("");
 
   // schedule
@@ -193,6 +197,17 @@ export default function SchedulerClient({
     }
   }, []);
 
+  /* Verified senders, once. A failure leaves the select hidden and the
+     schedule goes out as the default, which is the pre-existing behaviour. */
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/senders")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (!cancelled && data) setSenders(data.senders ?? []); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
   // Poll while the tab is visible. Without this the list keeps showing "Pending"
   // long after the cron has actually sent, since it only loaded once on mount.
   useEffect(() => {
@@ -252,6 +267,7 @@ export default function SchedulerClient({
           offset: sendOffset,
           excludeRecentDays: excludeRecent ? excludeDays : null,
           replyTo: replyTo.trim() || null,
+          senderEmail: senderEmail || null,
           localDateTime,
           timezone,
           batchIntervalMinutes: drip ? dripMinutes : null,
@@ -404,6 +420,19 @@ export default function SchedulerClient({
                 <label style={LABEL}>Reply-to (optional)</label>
                 <input style={INPUT} value={replyTo} onChange={(e) => setReplyTo(e.target.value)} placeholder="patrick@metroassoc.com" />
               </div>
+              {senders.length > 1 && (
+                <div>
+                  <label style={LABEL}>Send from</label>
+                  <select style={INPUT} value={senderEmail} onChange={(e) => setSenderEmail(e.target.value)}>
+                    <option value="">Default sender</option>
+                    {senders.map((s) => (
+                      <option key={s.email} value={s.email}>
+                        {s.name ? `${s.name} <${s.email}>` : s.email}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
 
             <label className="flex items-center gap-2 cursor-pointer" style={{ fontSize: 13, color: "var(--admin-text-secondary)" }}>
@@ -476,6 +505,7 @@ export default function SchedulerClient({
               <ReviewRow label="Subject" value={subject || "—"} />
               <ReviewRow label="Batch size" value={String(dailyLimit)} />
               {sendOffset > 0 && <ReviewRow label="Skip first" value={String(sendOffset)} />}
+              {senderEmail && <ReviewRow label="Send from" value={senderEmail} />}
               {replyTo && <ReviewRow label="Reply-to" value={replyTo} />}
               {excludeRecent && <ReviewRow label="Exclude recent" value={`Emailed in last ${excludeDays} days`} />}
               <ReviewRow

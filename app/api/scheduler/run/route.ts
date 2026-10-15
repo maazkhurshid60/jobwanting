@@ -38,6 +38,8 @@ interface ScheduledRow {
   total_target: number;
   repeat_every: string | null;
   recipient_count: number;
+  sender_email: string | null;
+  sender_name: string | null;
 }
 
 function authorized(req: NextRequest): boolean {
@@ -80,12 +82,15 @@ async function queueRepeat(row: ScheduledRow): Promise<number | null> {
     sql: `INSERT INTO scheduled_campaigns
             (subject, body, is_html, list_id, exclude_recent_days, daily_limit,
              send_offset, reply_to, attach_postcard, scheduled_at, timezone, status,
-             batch_interval_minutes, total_target, repeat_every)
-          VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+             batch_interval_minutes, total_target, repeat_every,
+             sender_email, sender_name)
+          VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
     args: [
       row.subject, row.body, row.is_html, row.list_id, row.exclude_recent_days,
       row.daily_limit, row.reply_to, row.attach_postcard, nextAt, row.timezone,
       row.batch_interval_minutes, row.total_target, row.repeat_every,
+      // A recurrence keeps the sender its original was scheduled with.
+      row.sender_email, row.sender_name,
     ],
   });
   return Number(res.lastInsertRowid);
@@ -99,7 +104,7 @@ async function processDue(): Promise<{ processed: number; reaped: number; result
     sql: `SELECT id, subject, body, is_html, list_id, exclude_recent_days,
                  daily_limit, send_offset, reply_to, attach_postcard,
                  scheduled_at, timezone, batch_interval_minutes, total_target,
-                 repeat_every, recipient_count
+                 repeat_every, recipient_count, sender_email, sender_name
           FROM scheduled_campaigns
           WHERE status = 'pending' AND COALESCE(next_batch_at, scheduled_at) <= ?
           ORDER BY COALESCE(next_batch_at, scheduled_at) ASC
@@ -131,6 +136,8 @@ async function processDue(): Promise<{ processed: number; reaped: number; result
       offset: row.send_offset,
       replyTo: row.reply_to,
       attachPostcard: !!row.attach_postcard,
+      senderEmail: row.sender_email,
+      senderName: row.sender_name,
     };
 
     try {

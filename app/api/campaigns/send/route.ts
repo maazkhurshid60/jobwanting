@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
-import { sendCampaignEmail } from "@/lib/brevo";
+import { sendCampaignEmail, resolveSender } from "@/lib/brevo";
 import {
   personalize,
   wrapInHtmlTemplate,
@@ -27,6 +27,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Subject and body are required" }, { status: 400 });
   }
 
+  // Confirm the chosen sender against Brevo before anything goes out.
+  const resolved = await resolveSender(payload.senderEmail);
+  if (!resolved.ok) {
+    return NextResponse.json({ error: resolved.error }, { status: resolved.status });
+  }
+  const sender = resolved.sender;
+
   // Test Send: deliver a single [TEST] copy, no targeting, no logging.
   if (isTestSend) {
     if (!testEmail?.trim()) {
@@ -43,6 +50,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         subject: personalizedSubject,
         htmlContent: wrappedHtml,
         replyTo: replyTo ?? undefined,
+        sender,
         attachments: attachmentsOption,
         recipients: [{ email: testEmail.trim(), name: "Test Recipient", personalizedHtml: wrappedHtml }],
       });
@@ -58,7 +66,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   // Real send — shared core (identical logic used by the scheduler worker).
-  const result = await sendCampaignNow(payload);
+  // Pass the resolved sender rather than the raw body value, so the send core
+  // only ever sees an address that just came back from Brevo's own list.
+  const result = await sendCampaignNow({
+    ...payload,
+    senderEmail: sender?.email ?? null,
+    senderName: sender?.name ?? null,
+  });
   if (!result.ok) {
     const status = result.error === "No eligible contacts to send to" ? 400 : 500;
     return NextResponse.json({ error: result.error ?? "Send failed" }, { status });

@@ -337,6 +337,11 @@ function bootstrap(db: Client): void {
       // Hobby plan caps functions at 60s) would otherwise strand the row in
       // 'processing' forever; the worker reaps rows whose claim has gone stale.
       db.execute("ALTER TABLE scheduled_campaigns ADD COLUMN claimed_at INTEGER").catch(() => {}),
+      // Which verified Brevo sender a scheduled campaign goes out as. NULL on
+      // every existing row, which the send core reads as "use the configured
+      // default" — the behaviour those rows were scheduled under.
+      db.execute("ALTER TABLE scheduled_campaigns ADD COLUMN sender_email TEXT").catch(() => {}),
+      db.execute("ALTER TABLE scheduled_campaigns ADD COLUMN sender_name TEXT").catch(() => {}),
       // Template Library categories (see lib/templateCategories.ts) — distinct
       // from list_id, which scopes a template to a contact list rather than
       // classifying what kind of email it is.

@@ -135,6 +135,12 @@ export default function CampaignClient({
   const [excludeRecent, setExcludeRecent] = useState(true);
   const [excludeDays, setExcludeDays] = useState(30);
   const [replyTo, setReplyTo] = useState("");
+  /* The verified Brevo senders this account may send as, and which one is
+     picked. Empty string means "use the configured default", so a campaign
+     still goes out unchanged if the list never loads. */
+  const [senders, setSenders] = useState<{ email: string; name: string }[]>([]);
+  const [senderEmail, setSenderEmail] = useState("");
+  const [senderError, setSenderError] = useState<string | null>(null);
   const [isTestSend, setIsTestSend] = useState(false);
   const [testEmail, setTestEmail] = useState("");
   const [loading, setLoading] = useState(false);
@@ -251,6 +257,28 @@ export default function CampaignClient({
   // Refetch history whenever the list filter changes (covers initial load too)
   useEffect(() => { fetchHistory(historyFilter); }, [historyFilter]);
 
+  /* Load the senders once. A failure here is not fatal: the select falls back
+     to the single default option, which is how this page behaved before, so
+     the only thing lost is the choice. The reason is kept and shown rather
+     than leaving an unexplained one-item dropdown. */
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/senders")
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!res.ok) {
+          setSenderError(data.error ?? "Could not load the sender list.");
+          return;
+        }
+        setSenders(data.senders ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setSenderError("Could not load the sender list.");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   useEffect(() => {
     fetchLists();
     fetchContactCount();
@@ -356,6 +384,7 @@ export default function CampaignClient({
           offset: sendOffset,
           excludeRecentDays: excludeRecent ? excludeDays : null,
           replyTo: replyTo.trim() || null,
+          senderEmail: senderEmail || null,
           isTestSend,
           testEmail: isTestSend ? testEmail.trim() : null,
           customAttachment: customAttachment ? { name: customAttachment.name, content: customAttachment.content } : null,
@@ -432,6 +461,16 @@ export default function CampaignClient({
                 Subject: <span className="text-(--admin-text)">{subject.trim() || "—"}</span>
               </p>
             </div>
+            {/* Send-from. Shown only when it isn't the default, so the review
+                step stays quiet about a setting that wasn't touched. */}
+            {senderEmail && (
+              <div className="flex items-start gap-2.5">
+                <Mail size={15} className="mt-0.5 shrink-0" style={{ color: "var(--admin-accent-text)" }} />
+                <p className="text-sm" style={{ color: "var(--admin-text-secondary)" }}>
+                  Sent from <span className="text-(--admin-text)">{senderEmail}</span>
+                </p>
+              </div>
+            )}
             {/* Reply-to */}
             <div className="flex items-start gap-2.5">
               <Reply size={15} className="mt-0.5 shrink-0" style={{ color: "var(--admin-accent-text)" }} />
@@ -901,6 +940,34 @@ export default function CampaignClient({
           {/* STEP 4 — Email */}
           {step === 4 && (
             <>
+              {/* Send-from. Only rendered with something to choose between:
+                  a one-option select is a worse way of saying "the default"
+                  than saying nothing. */}
+              {senders.length > 1 && (
+                <div>
+                  <label style={labelStyle}>
+                    Send from <span style={{ color: "var(--admin-text-faint)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(which verified address this goes out as)</span>
+                  </label>
+                  <select
+                    style={inputStyle}
+                    value={senderEmail}
+                    onChange={(e) => setSenderEmail(e.target.value)}
+                  >
+                    <option value="">Default sender</option>
+                    {senders.map((s) => (
+                      <option key={s.email} value={s.email}>
+                        {s.name ? `${s.name} <${s.email}>` : s.email}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {senderError && (
+                <p className="text-xs" style={{ color: "var(--admin-text-muted)" }}>
+                  {senderError} Sending as the default address.
+                </p>
+              )}
+
               {/* Reply-to */}
               <div>
                 <label style={labelStyle}>
