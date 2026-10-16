@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
-import { sendCampaignEmail, resolveSender } from "@/lib/brevo";
+import { sendCampaignEmail, resolveSender, resolveSenders } from "@/lib/brevo";
 import {
   personalize,
   wrapInHtmlTemplate,
@@ -14,9 +14,14 @@ export const revalidate = 0;
 
 // POST /api/campaigns/send
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  const payload = await req.json() as CampaignSendParams & {
+  /* senderEmails is overridden because the two sides carry different
+     shapes on purpose: the browser sends addresses, and only the resolved
+     {email,name} pairs that came back from Brevo are handed to the send
+     core, so a name can never be attacker-supplied. */
+  const payload = await req.json() as Omit<CampaignSendParams, "senderEmails"> & {
     isTestSend?: boolean;
     testEmail?: string | null;
+    senderEmails?: string[] | null;
   };
   const {
     subject, body, isHtml, replyTo, isTestSend, testEmail,
@@ -34,6 +39,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   const sender = resolved.sender;
 
+  /* And the rotation, if one was chosen. Validated the same way and for the
+     same reason: an unverified address here would not fail the campaign, it
+     would fail every Nth email in it, which is far harder to notice than a
+     campaign that does not start. */
+  const resolvedRotation = await resolveSenders(payload.senderEmails);
+  if (!resolvedRotation.ok) {
+    return NextResponse.json(
+      { error: resolvedRotation.error },
+      { status: resolvedRotation.status },
+    );
+  }
+  const rotation = resolvedRotation.senders;
+
   // Test Send: deliver a single [TEST] copy, no targeting, no logging.
   if (isTestSend) {
     if (!testEmail?.trim()) {
@@ -50,7 +68,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         subject: personalizedSubject,
         htmlContent: wrappedHtml,
         replyTo: replyTo ?? undefined,
-        sender,
+        /* A test send is one email, so a rotation has nothing to rotate
+           through: it goes out as the first address, which is what the real
+           campaign's first email will use. */
+        sender: rotation.length ? rotation[0] : sender,
         attachments: attachmentsOption,
         recipients: [{ email: testEmail.trim(), name: "Test Recipient", personalizedHtml: wrappedHtml }],
       });
@@ -72,6 +93,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     ...payload,
     senderEmail: sender?.email ?? null,
     senderName: sender?.name ?? null,
+    senderEmails: rotation.length ? rotation : null,
+    senderRotateEvery: payload.senderRotateEvery ?? 1,
   });
   if (!result.ok) {
     const status = result.error === "No eligible contacts to send to" ? 400 : 500;

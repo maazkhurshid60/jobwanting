@@ -142,6 +142,12 @@ export default function CampaignClient({
   const [senders, setSenders] = useState<{ email: string; name: string }[]>([]);
   const [senderEmail, setSenderEmail] = useState("");
   const [senderError, setSenderError] = useState<string | null>(null);
+  /* Rotation. rotationEmails is ordered by the order they were ticked, not
+     by the order they appear in the list, because that order is the sending
+     order and the client picked it deliberately. */
+  const [rotateSenders, setRotateSenders] = useState(false);
+  const [rotationEmails, setRotationEmails] = useState<string[]>([]);
+  const [rotateEvery, setRotateEvery] = useState(1);
   const [isTestSend, setIsTestSend] = useState(false);
   const [testEmail, setTestEmail] = useState("");
   const [loading, setLoading] = useState(false);
@@ -386,6 +392,12 @@ export default function CampaignClient({
           excludeRecentDays: excludeRecent ? excludeDays : null,
           replyTo: replyTo.trim() || null,
           senderEmail: senderEmail || null,
+          /* Only a rotation of two or more is one. Sending a single-address
+             "rotation" would take the rotation path server-side and record
+             itself as something it is not. */
+          senderEmails:
+            rotateSenders && rotationEmails.length > 1 ? rotationEmails : null,
+          senderRotateEvery: rotateEvery,
           isTestSend,
           testEmail: isTestSend ? testEmail.trim() : null,
           customAttachment: customAttachment ? { name: customAttachment.name, content: customAttachment.content } : null,
@@ -422,6 +434,108 @@ export default function CampaignClient({
     if (!subject.trim() || !body.trim()) { toast.error("Subject and body are required"); return; }
     localStorage.setItem("scheduler_draft", JSON.stringify({ subject, body, isHtml: bodyIsHtml }));
     router.push("/bd825db8c738/scheduler");
+  }
+
+  /* The sender control, rendered identically on the Email step and again on
+     the Schedule step. One definition because two copies of a control this
+     stateful drift: the first version of this was duplicated and the second
+     copy silently kept the old single-select after rotation was added.
+
+     Rotation order is tick order, which is the sending order. */
+  function toggleRotationEmail(email: string) {
+    setRotationEmails((prev) =>
+      prev.includes(email) ? prev.filter((e) => e !== email) : [...prev, email],
+    );
+  }
+
+  function senderPicker() {
+    if (senders.length <= 1) {
+      return senderError ? (
+        <p className="text-xs" style={{ color: "var(--admin-text-muted)" }}>
+          {senderError} Sending as the default address.
+        </p>
+      ) : null;
+    }
+    return (
+      <div className="flex flex-col gap-3">
+        <div>
+          <label style={labelStyle}>
+            Send from <span style={{ color: "var(--admin-text-faint)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(which verified address this goes out as)</span>
+          </label>
+          {rotateSenders ? (
+            <div className="flex flex-col gap-2 p-3 rounded-xl" style={{ background: "var(--admin-surface-2)", border: "1px solid var(--admin-border)" }}>
+              {senders.map((s) => {
+                const order = rotationEmails.indexOf(s.email);
+                return (
+                  <label key={s.email} className="flex items-center gap-2 cursor-pointer text-sm" style={{ color: "var(--admin-text-secondary)" }}>
+                    <input
+                      type="checkbox"
+                      checked={order !== -1}
+                      onChange={() => toggleRotationEmail(s.email)}
+                    />
+                    {order !== -1 && (
+                      <span
+                        className="inline-flex items-center justify-center text-[10px] font-bold rounded-full"
+                        style={{ width: 18, height: 18, background: "var(--admin-accent)", color: "#fff" }}
+                      >
+                        {order + 1}
+                      </span>
+                    )}
+                    <span className="text-(--admin-text)">
+                      {s.name ? `${s.name} <${s.email}>` : s.email}
+                    </span>
+                  </label>
+                );
+              })}
+              <div className="flex items-center gap-2 pt-2" style={{ borderTop: "1px solid var(--admin-border)" }}>
+                <span className="text-xs" style={{ color: "var(--admin-text-secondary)" }}>Switch sender every</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={rotateEvery}
+                  onChange={(e) => setRotateEvery(Math.max(1, Number(e.target.value) || 1))}
+                  style={{ ...inputStyle, width: 90, padding: "0.35rem 0.6rem" }}
+                />
+                <span className="text-xs" style={{ color: "var(--admin-text-secondary)" }}>email{rotateEvery === 1 ? "" : "s"}</span>
+              </div>
+              {rotationEmails.length < 2 && (
+                <p className="text-xs" style={{ color: "var(--admin-warning)" }}>
+                  Pick at least two addresses, or the campaign sends from one anyway.
+                </p>
+              )}
+            </div>
+          ) : (
+            <select
+              style={inputStyle}
+              value={senderEmail}
+              onChange={(e) => setSenderEmail(e.target.value)}
+            >
+              <option value="">Default sender</option>
+              {senders.map((s) => (
+                <option key={s.email} value={s.email}>
+                  {s.name ? `${s.name} <${s.email}>` : s.email}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        <label className="flex items-center gap-2 cursor-pointer text-xs" style={{ color: "var(--admin-text-secondary)" }}>
+          <input
+            type="checkbox"
+            checked={rotateSenders}
+            onChange={(e) => setRotateSenders(e.target.checked)}
+          />
+          Rotate between several addresses
+        </label>
+
+        {senderError && (
+          <p className="text-xs" style={{ color: "var(--admin-text-muted)" }}>
+            {senderError} Sending as the default address.
+          </p>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -944,30 +1058,7 @@ export default function CampaignClient({
               {/* Send-from. Only rendered with something to choose between:
                   a one-option select is a worse way of saying "the default"
                   than saying nothing. */}
-              {senders.length > 1 && (
-                <div>
-                  <label style={labelStyle}>
-                    Send from <span style={{ color: "var(--admin-text-faint)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(which verified address this goes out as)</span>
-                  </label>
-                  <select
-                    style={inputStyle}
-                    value={senderEmail}
-                    onChange={(e) => setSenderEmail(e.target.value)}
-                  >
-                    <option value="">Default sender</option>
-                    {senders.map((s) => (
-                      <option key={s.email} value={s.email}>
-                        {s.name ? `${s.name} <${s.email}>` : s.email}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              {senderError && (
-                <p className="text-xs" style={{ color: "var(--admin-text-muted)" }}>
-                  {senderError} Sending as the default address.
-                </p>
-              )}
+              {senderPicker()}
 
               {/* Reply-to */}
               <div>
@@ -1144,45 +1235,42 @@ export default function CampaignClient({
                   <strong className="text-(--admin-text)">{sendCount}</strong> recipient{sendCount !== 1 ? "s" : ""} · subject &ldquo;{subject.trim() || "—"}&rdquo;
                 </p>
                 <p className="text-sm" style={{ color: "var(--admin-text-secondary)" }}>
-                  From{" "}
-                  <strong className="text-(--admin-text)">
-                    {senderEmail || "the default sender"}
-                  </strong>
+                  {rotateSenders && rotationEmails.length > 1 ? (
+                    <>
+                      Rotating{" "}
+                      <strong className="text-(--admin-text)">
+                        {rotationEmails.length} addresses
+                      </strong>
+                      , switching every{" "}
+                      <strong className="text-(--admin-text)">
+                        {rotateEvery} email{rotateEvery === 1 ? "" : "s"}
+                      </strong>
+                    </>
+                  ) : (
+                    <>
+                      From{" "}
+                      <strong className="text-(--admin-text)">
+                        {senderEmail || "the default sender"}
+                      </strong>
+                    </>
+                  )}
                   {" · "}replies to{" "}
                   <strong className="text-(--admin-text)">
                     {replyTo.trim() || "patrick@metroassoc.com"}
                   </strong>
                 </p>
+                {rotateSenders && rotationEmails.length > 1 && (
+                  <p className="text-xs" style={{ color: "var(--admin-text-muted)" }}>
+                    {rotationEmails.join(" → ")} → repeat
+                  </p>
+                )}
               </div>
 
               {/* Repeated from step 4 on purpose.
                   Which domain a campaign goes out as is decided at the moment
                   of sending, not while writing the body, and step 4 is three
                   screens back by the time anyone reaches this button. */}
-              {senders.length > 1 && (
-                <div>
-                  <label style={labelStyle}>
-                    Send from <span style={{ color: "var(--admin-text-faint)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(which verified address this goes out as)</span>
-                  </label>
-                  <select
-                    style={inputStyle}
-                    value={senderEmail}
-                    onChange={(e) => setSenderEmail(e.target.value)}
-                  >
-                    <option value="">Default sender</option>
-                    {senders.map((s) => (
-                      <option key={s.email} value={s.email}>
-                        {s.name ? `${s.name} <${s.email}>` : s.email}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              {senderError && (
-                <p className="text-xs" style={{ color: "var(--admin-text-muted)" }}>
-                  {senderError} Sending as the default address.
-                </p>
-              )}
+              {senderPicker()}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <button

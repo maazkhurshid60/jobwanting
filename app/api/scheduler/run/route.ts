@@ -40,6 +40,27 @@ interface ScheduledRow {
   recipient_count: number;
   sender_email: string | null;
   sender_name: string | null;
+  sender_emails: string | null;
+  sender_rotate_every: number | null;
+}
+
+/** The sender rotation off a scheduled row, or null if there isn't a usable
+ *  one. Shape-checked rather than trusted: this column is written by the
+ *  scheduler route, but a hand-edited row should degrade to the single
+ *  sender instead of sending from an object with no address. */
+function parseSenders(raw: string | null): { email: string; name?: string }[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    const senders = parsed.filter(
+      (s): s is { email: string; name?: string } =>
+        !!s && typeof s.email === "string" && s.email.length > 0,
+    );
+    return senders.length > 0 ? senders : null;
+  } catch {
+    return null;
+  }
 }
 
 function authorized(req: NextRequest): boolean {
@@ -83,14 +104,16 @@ async function queueRepeat(row: ScheduledRow): Promise<number | null> {
             (subject, body, is_html, list_id, exclude_recent_days, daily_limit,
              send_offset, reply_to, attach_postcard, scheduled_at, timezone, status,
              batch_interval_minutes, total_target, repeat_every,
-             sender_email, sender_name)
-          VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+             sender_email, sender_name, sender_emails, sender_rotate_every)
+          VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       row.subject, row.body, row.is_html, row.list_id, row.exclude_recent_days,
       row.daily_limit, row.reply_to, row.attach_postcard, nextAt, row.timezone,
       row.batch_interval_minutes, row.total_target, row.repeat_every,
-      // A recurrence keeps the sender its original was scheduled with.
+      // A recurrence keeps the sender, and the rotation, its original was
+      // scheduled with.
       row.sender_email, row.sender_name,
+      row.sender_emails, row.sender_rotate_every,
     ],
   });
   return Number(res.lastInsertRowid);
@@ -104,7 +127,8 @@ async function processDue(): Promise<{ processed: number; reaped: number; result
     sql: `SELECT id, subject, body, is_html, list_id, exclude_recent_days,
                  daily_limit, send_offset, reply_to, attach_postcard,
                  scheduled_at, timezone, batch_interval_minutes, total_target,
-                 repeat_every, recipient_count, sender_email, sender_name
+                 repeat_every, recipient_count, sender_email, sender_name,
+                 sender_emails, sender_rotate_every
           FROM scheduled_campaigns
           WHERE status = 'pending' AND COALESCE(next_batch_at, scheduled_at) <= ?
           ORDER BY COALESCE(next_batch_at, scheduled_at) ASC
@@ -138,6 +162,12 @@ async function processDue(): Promise<{ processed: number; reaped: number; result
       attachPostcard: !!row.attach_postcard,
       senderEmail: row.sender_email,
       senderName: row.sender_name,
+      /* Stored as JSON. A row written before this column existed, or one
+         holding something unparseable, falls back to no rotation and the
+         single sender rather than failing the send: a malformed column is
+         not a reason to drop a scheduled campaign on the floor. */
+      senderEmails: parseSenders(row.sender_emails),
+      senderRotateEvery: row.sender_rotate_every,
     };
 
     try {

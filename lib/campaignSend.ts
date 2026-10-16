@@ -116,6 +116,11 @@ export interface CampaignSendParams {
      against Brevo's sender list by the caller, not here. */
   senderEmail?: string | null;
   senderName?: string | null;
+  /* Sender rotation. When two or more are given these win over senderEmail,
+     and the campaign cycles through them in this order, switching every
+     senderRotateEvery emails. */
+  senderEmails?: { email: string; name?: string }[] | null;
+  senderRotateEvery?: number | null;
 }
 
 export interface CampaignSendResult {
@@ -156,13 +161,24 @@ export async function sendCampaignNow(params: CampaignSendParams): Promise<Campa
   const {
     subject, body, isHtml, listId, excludeRecentDays, dailyLimit, offset,
     replyTo, attachPostcard, customAttachment, senderEmail, senderName,
+    senderEmails, senderRotateEvery,
   } = params;
+
+  /* A rotation of one is just a single sender, so it collapses rather than
+     taking the rotation path and reporting itself as something it isn't. */
+  const rotation = senderEmails?.length ? senderEmails : null;
 
   /* Undefined rather than a half-filled object when no sender was chosen, so
      sendCampaignEmail falls through to BREVO_SENDER_EMAIL as before. */
   const sender = senderEmail
     ? { email: senderEmail, name: senderName ?? undefined }
     : undefined;
+  const senderOpts = {
+    sender,
+    ...(rotation
+      ? { senders: rotation, rotateEvery: senderRotateEvery ?? 1 }
+      : {}),
+  };
 
   if (!subject?.trim() || !body?.trim()) {
     return { ok: false, recipients: 0, failed: 0, error: "Subject and body are required" };
@@ -258,7 +274,7 @@ export async function sendCampaignNow(params: CampaignSendParams): Promise<Campa
       subject,
       htmlContent: body,
       replyTo: replyTo ?? undefined,
-      sender,
+      ...senderOpts,
       attachments: attachmentsOption,
       recipients: contacts.map((c) => {
         const personalizedText = personalize(body, c);
@@ -315,8 +331,10 @@ export async function sendCampaignNow(params: CampaignSendParams): Promise<Campa
         htmlContent: wrapInHtmlTemplate(verifierBodyText, VERIFIER_EMAILS[0], 0, !!isHtml),
         replyTo: replyTo ?? undefined,
         /* The verifier copy is meant to be what the recipients got, so it
-           goes out as the same sender rather than the default. */
-        sender,
+           goes out as the same sender. With a rotation that is necessarily
+           one of several; the first is used, since the copy exists to show
+           what the campaign looked like, not to re-run the rotation. */
+        sender: rotation ? rotation[0] : sender,
         attachments: attachmentsOption,
         recipients: VERIFIER_EMAILS.map((e) => ({
           email: e,

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 import { zonedWallTimeToUtcEpoch, isRepeatEvery, REPEAT_INTERVAL_DAYS } from "@/lib/schedule";
-import { resolveSender } from "@/lib/brevo";
+import { resolveSender, resolveSenders } from "@/lib/brevo";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -54,6 +54,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     batchIntervalMinutes?: number | null; // null/0 = send once, don't drip
     repeatEvery?: string | null;          // 'daily' | 'weekly' | 'monthly'
     senderEmail?: string | null;          // null = the configured default
+    senderEmails?: string[] | null;       // two or more = rotate through them
+    senderRotateEvery?: number | null;    // emails per sender before switching
   };
 
   if (!b.subject?.trim() || !b.body?.trim()) {
@@ -112,6 +114,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   const sender = resolved.sender;
 
+  const resolvedRotation = await resolveSenders(b.senderEmails);
+  if (!resolvedRotation.ok) {
+    return NextResponse.json(
+      { error: resolvedRotation.error },
+      { status: resolvedRotation.status },
+    );
+  }
+  /* Stored resolved rather than as the addresses posted, so the worker that
+     runs this days from now sends from names Brevo gave us. */
+  const rotation = resolvedRotation.senders;
+
   const listId = b.listId ?? null;
   const totalTarget = await audienceSize(listId);
 
@@ -120,8 +133,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             (subject, body, is_html, list_id, exclude_recent_days, daily_limit,
              send_offset, reply_to, attach_postcard, scheduled_at, timezone, status,
              batch_interval_minutes, total_target, repeat_every,
-             sender_email, sender_name)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+             sender_email, sender_name, sender_emails, sender_rotate_every)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       b.subject.trim(),
       b.body,
@@ -139,6 +152,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       repeatEvery,
       sender?.email ?? null,
       sender?.name ?? null,
+      rotation.length ? JSON.stringify(rotation) : null,
+      rotation.length ? Math.max(1, Math.floor(b.senderRotateEvery ?? 1)) : null,
     ],
   });
 

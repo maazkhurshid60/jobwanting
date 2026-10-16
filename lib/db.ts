@@ -342,6 +342,12 @@ function bootstrap(db: Client): void {
       // default" — the behaviour those rows were scheduled under.
       db.execute("ALTER TABLE scheduled_campaigns ADD COLUMN sender_email TEXT").catch(() => {}),
       db.execute("ALTER TABLE scheduled_campaigns ADD COLUMN sender_name TEXT").catch(() => {}),
+      // Sender rotation: a JSON array of {email,name} in rotation order, and
+      // how many consecutive emails each one takes. NULL on every existing
+      // row, which the send core reads as "no rotation" — the single-sender
+      // behaviour those rows were scheduled under.
+      db.execute("ALTER TABLE scheduled_campaigns ADD COLUMN sender_emails TEXT").catch(() => {}),
+      db.execute("ALTER TABLE scheduled_campaigns ADD COLUMN sender_rotate_every INTEGER").catch(() => {}),
       // Template Library categories (see lib/templateCategories.ts) — distinct
       // from list_id, which scopes a template to a contact list rather than
       // classifying what kind of email it is.

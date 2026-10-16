@@ -32,6 +32,13 @@ export interface SendEmailOptions {
      Brevo would reject an unverified address anyway, but it would do so
      once per recipient, after the campaign had started. */
   sender?: { email: string; name?: string };
+  /* Rotate across several verified senders instead of using one.
+     Takes precedence over `sender`. Order is the order given, and
+     `rotateEvery` is how many consecutive emails each sender takes before
+     the next one: 1 alternates every email, 50 sends in blocks of fifty.
+     An empty array is treated as not set. */
+  senders?: { email: string; name?: string }[];
+  rotateEvery?: number;
 }
 
 export interface BrevoSender {
@@ -259,6 +266,51 @@ export async function resolveSender(
   return { ok: true, sender: { email: match.email, name: match.name } };
 }
 
+export type SendersResolution =
+  | { ok: true; senders: { email: string; name?: string }[] }
+  | { ok: false; status: 400 | 502; error: string };
+
+/**
+ * The rotation version of resolveSender: validates every address in one
+ * lookup and preserves the order given, which is the order they will be
+ * rotated through.
+ *
+ * All-or-nothing on purpose. Silently dropping an address that failed
+ * verification would still send the campaign, just not from where the sender
+ * asked, and the rotation would be a different shape than the one on screen.
+ */
+export async function resolveSenders(
+  emails?: string[] | null,
+): Promise<SendersResolution> {
+  const wanted = (emails ?? []).map((e) => e.trim()).filter(Boolean);
+  if (wanted.length === 0) return { ok: true, senders: [] };
+
+  let allowed: BrevoSender[];
+  try {
+    allowed = await listVerifiedSenders();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Could not reach Brevo";
+    return { ok: false, status: 502, error: `Could not confirm the sender addresses: ${message}` };
+  }
+
+  const resolved: { email: string; name?: string }[] = [];
+  const unknown: string[] = [];
+  for (const email of wanted) {
+    const match = allowed.find((s) => s.email.toLowerCase() === email.toLowerCase());
+    if (match) resolved.push({ email: match.email, name: match.name });
+    else unknown.push(email);
+  }
+
+  if (unknown.length > 0) {
+    return {
+      ok: false,
+      status: 400,
+      error: `Not verified on this Brevo account: ${unknown.join(", ")}.`,
+    };
+  }
+  return { ok: true, senders: resolved };
+}
+
 /**
  * Sends a transactional email to multiple recipients via Brevo API.
  * Each recipient gets an individual email (BCC-safe — no address leaking).
@@ -282,10 +334,24 @@ export async function sendCampaignEmail(
   const failed: { email: string; error: string }[] = [];
   let lastMessageId: string | undefined;
 
-  for (const recipient of opts.recipients) {
+  /* The rotation, if one was asked for.
+     Indexed on the recipient's position rather than on a counter that only
+     advances on success, so a bounce cannot shift every later recipient onto
+     a different sender and make a re-run send from somewhere else. A block
+     size below 1 would divide by zero or stall on one sender, so it is
+     floored. */
+  const rotation = opts.senders?.length ? opts.senders : null;
+  const rotateEvery = Math.max(1, Math.floor(opts.rotateEvery ?? 1));
+
+  for (const [index, recipient] of opts.recipients.entries()) {
+    const from = rotation
+      ? rotation[Math.floor(index / rotateEvery) % rotation.length]
+      : null;
     const html = recipient.personalizedHtml ?? opts.htmlContent;
     const payload: Record<string, unknown> = {
-      sender: { email: senderEmail, name: senderName },
+      sender: from
+        ? { email: from.email, name: from.name ?? senderName }
+        : { email: senderEmail, name: senderName },
       to: [{ email: recipient.email, name: recipient.name ?? recipient.email }],
       subject: recipient.personalizedSubject ?? opts.subject,
       htmlContent: html,
