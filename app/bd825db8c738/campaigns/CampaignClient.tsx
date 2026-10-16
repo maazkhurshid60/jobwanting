@@ -18,6 +18,8 @@ const STEPS = [
   { n: 6, label: "Schedule" },
 ] as const;
 
+import { SMTP_PROVIDERS, providerById, providerForEmail } from "@/lib/smtpProviders";
+
 interface SmtpAccount {
   id: number;
   label: string;
@@ -169,6 +171,9 @@ export default function CampaignClient({
   });
   const [mailboxBusy, setMailboxBusy] = useState(false);
   const [mailboxMsg, setMailboxMsg] = useState<string | null>(null);
+  const [providerId, setProviderId] = useState("");
+  const [showMailboxAdvanced, setShowMailboxAdvanced] = useState(false);
+  const provider = providerId ? providerById(providerId) : undefined;
   const [isTestSend, setIsTestSend] = useState(false);
   const [testEmail, setTestEmail] = useState("");
   const [loading, setLoading] = useState(false);
@@ -471,6 +476,36 @@ export default function CampaignClient({
     );
   }
 
+  /* Settings that follow from the provider, filled in rather than asked for.
+     Anything the user has already typed by hand is left alone, so switching
+     provider after editing a host does not quietly undo the edit. */
+  function applyProvider(id: string) {
+    setProviderId(id);
+    const p = providerById(id);
+    if (!p || p.id === "other") return;
+    setMailboxForm((f) => ({
+      ...f,
+      host: p.host,
+      port: p.port,
+      dailyLimit: p.dailyLimit,
+    }));
+  }
+
+  function applyEmail(email: string) {
+    setMailboxForm((f) => ({
+      ...f,
+      fromEmail: email,
+      /* Username is the address for every provider here. It stays editable
+         under Advanced for the hosts where it is not. */
+      username: email,
+      /* A label is only needed to tell mailboxes apart in the dropdown, so
+         the address is a better default than making someone invent one. */
+      label: f.label || email,
+    }));
+    const detected = providerForEmail(email);
+    if (detected && detected.id !== providerId) applyProvider(detected.id);
+  }
+
   async function loadMailboxes() {
     try {
       const res = await fetch("/api/smtp-accounts");
@@ -565,47 +600,120 @@ export default function CampaignClient({
 
         {showAddMailbox && (
           <div className="flex flex-col gap-2 p-3 rounded-xl" style={{ background: "var(--admin-surface-2)", border: "1px solid var(--admin-border)" }}>
-            {([
-              ["label", "Name, e.g. Patrick (Outlook)"],
-              ["host", "SMTP host, e.g. smtp.office365.com"],
-              ["username", "Username, usually the full address"],
-              ["password", "App password, not the account password"],
-              ["fromEmail", "From address"],
-              ["fromName", "From name (optional)"],
-            ] as const).map(([key, placeholder]) => (
-              <input
-                key={key}
-                style={inputStyle}
-                type={key === "password" ? "password" : "text"}
-                placeholder={placeholder}
-                value={mailboxForm[key] as string}
-                onChange={(e) => setMailboxForm((f) => ({ ...f, [key]: e.target.value }))}
-              />
-            ))}
-            <div className="flex gap-2">
-              <input
-                style={{ ...inputStyle, width: 110 }}
-                type="number"
-                placeholder="Port"
-                value={mailboxForm.port}
-                onChange={(e) => setMailboxForm((f) => ({ ...f, port: Number(e.target.value) || 587 }))}
-              />
-              <input
-                style={{ ...inputStyle, width: 150 }}
-                type="number"
-                placeholder="Daily limit"
-                value={mailboxForm.dailyLimit}
-                onChange={(e) => setMailboxForm((f) => ({ ...f, dailyLimit: Number(e.target.value) || 400 }))}
-              />
-            </div>
-            <p className="text-[11px]" style={{ color: "var(--admin-text-muted)" }}>
-              Use an app password. Gmail and Outlook both refuse a normal
-              password once two-factor is on, and an app password can be
-              revoked without changing the account login.
-            </p>
+            {/* Address first. Typing it picks the provider, which fills the
+                host, port, TLS mode and a safe daily limit, so the common
+                case is two fields rather than seven. */}
+            <input
+              style={inputStyle}
+              type="email"
+              placeholder="Email address, e.g. patrick@metroassoc.com"
+              value={mailboxForm.fromEmail}
+              onChange={(e) => applyEmail(e.target.value)}
+            />
+
+            <select
+              style={inputStyle}
+              value={providerId}
+              onChange={(e) => applyProvider(e.target.value)}
+            >
+              <option value="">Detecting from the address…</option>
+              {SMTP_PROVIDERS.map((p) => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
+            </select>
+
+            <input
+              style={inputStyle}
+              type="password"
+              placeholder="App password"
+              value={mailboxForm.password}
+              onChange={(e) => setMailboxForm((f) => ({ ...f, password: e.target.value }))}
+            />
+
+            {provider?.note && (
+              <p className="text-[11px]" style={{ color: "var(--admin-text-muted)" }}>
+                {provider.note}
+              </p>
+            )}
+            {provider?.appPasswordUrl && (
+              <a
+                href={provider.appPasswordUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[11px] underline self-start"
+                style={{ color: "var(--admin-accent-text)" }}
+              >
+                Create an app password for {provider.label} →
+              </a>
+            )}
+
+            {provider && provider.id !== "other" && (
+              <p className="text-[11px]" style={{ color: "var(--admin-text-muted)" }}>
+                {provider.host}:{provider.port} · up to {provider.dailyLimit} recipients a day
+              </p>
+            )}
+
+            {/* Everything derivable is hidden until someone needs it. Shown
+                automatically for "Other", where there is nothing to derive. */}
+            {(showMailboxAdvanced || providerId === "other") && (
+              <div className="flex flex-col gap-2 pt-2" style={{ borderTop: "1px solid var(--admin-border)" }}>
+                <input
+                  style={inputStyle}
+                  placeholder="SMTP host"
+                  value={mailboxForm.host}
+                  onChange={(e) => setMailboxForm((f) => ({ ...f, host: e.target.value }))}
+                />
+                <div className="flex gap-2">
+                  <input
+                    style={{ ...inputStyle, width: 110 }}
+                    type="number"
+                    placeholder="Port"
+                    value={mailboxForm.port}
+                    onChange={(e) => setMailboxForm((f) => ({ ...f, port: Number(e.target.value) || 587 }))}
+                  />
+                  <input
+                    style={{ ...inputStyle, width: 150 }}
+                    type="number"
+                    placeholder="Daily limit"
+                    value={mailboxForm.dailyLimit}
+                    onChange={(e) => setMailboxForm((f) => ({ ...f, dailyLimit: Number(e.target.value) || 300 }))}
+                  />
+                </div>
+                <input
+                  style={inputStyle}
+                  placeholder="Username, if different from the address"
+                  value={mailboxForm.username}
+                  onChange={(e) => setMailboxForm((f) => ({ ...f, username: e.target.value }))}
+                />
+                <input
+                  style={inputStyle}
+                  placeholder="Display name, e.g. Patrick Novick"
+                  value={mailboxForm.fromName}
+                  onChange={(e) => setMailboxForm((f) => ({ ...f, fromName: e.target.value }))}
+                />
+                <input
+                  style={inputStyle}
+                  placeholder="Label for the dropdown"
+                  value={mailboxForm.label}
+                  onChange={(e) => setMailboxForm((f) => ({ ...f, label: e.target.value }))}
+                />
+              </div>
+            )}
+
+            {providerId !== "other" && (
+              <button
+                type="button"
+                onClick={() => setShowMailboxAdvanced((v) => !v)}
+                className="self-start text-[11px] underline"
+                style={{ color: "var(--admin-text-muted)" }}
+              >
+                {showMailboxAdvanced ? "Hide advanced settings" : "Advanced settings"}
+              </button>
+            )}
+
             <button
               type="button"
-              disabled={mailboxBusy}
+              disabled={mailboxBusy || !mailboxForm.fromEmail || !mailboxForm.password}
               onClick={saveMailbox}
               className="self-start px-4 py-2 rounded-full text-xs font-bold text-white disabled:opacity-50"
               style={{ background: "var(--admin-accent)" }}
