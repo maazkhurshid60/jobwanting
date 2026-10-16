@@ -72,6 +72,27 @@ body {
   --admin-warning-soft: rgba(245, 158, 11, 0.12);
   --admin-hover-bg: rgba(255, 255, 255, 0.08);
   --admin-scrim: rgba(0, 0, 0, 0.6);
+
+  /* The list a <select> drops open is native UI, drawn by the browser rather
+     than from the panel's styles. Without this it renders on the system's
+     white background while the options inherit --admin-text, which in dark
+     mode is #ffffff: white on white, so the list reads as empty and only the
+     highlighted row is legible. Reported on the campaign sender picker; it
+     applied to every select in the panel. */
+  color-scheme: dark;
+}
+
+[data-admin-theme="light"] {
+  color-scheme: light;
+}
+
+/* Belt and braces for engines that ignore color-scheme on a popup. Note this
+   is --admin-surface and not --admin-surface-2: surface-2 is a translucent
+   white, which composites against the native popup's own background and
+   washes straight back out. */
+[data-admin-theme] select option {
+  background-color: var(--admin-surface);
+  color: var(--admin-text);
 }
 
 [data-admin-theme="light"] {

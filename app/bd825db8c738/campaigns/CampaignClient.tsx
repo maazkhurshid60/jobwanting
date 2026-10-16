@@ -77,6 +77,7 @@ const inputStyle = {
   width: "100%",
 };
 
+
 const labelStyle = {
   display: "block" as const,
   fontSize: "0.75rem",
@@ -1142,7 +1143,46 @@ export default function CampaignClient({
                 <p className="text-sm" style={{ color: "var(--admin-text-secondary)" }}>
                   <strong className="text-(--admin-text)">{sendCount}</strong> recipient{sendCount !== 1 ? "s" : ""} · subject &ldquo;{subject.trim() || "—"}&rdquo;
                 </p>
+                <p className="text-sm" style={{ color: "var(--admin-text-secondary)" }}>
+                  From{" "}
+                  <strong className="text-(--admin-text)">
+                    {senderEmail || "the default sender"}
+                  </strong>
+                  {" · "}replies to{" "}
+                  <strong className="text-(--admin-text)">
+                    {replyTo.trim() || "patrick@metroassoc.com"}
+                  </strong>
+                </p>
               </div>
+
+              {/* Repeated from step 4 on purpose.
+                  Which domain a campaign goes out as is decided at the moment
+                  of sending, not while writing the body, and step 4 is three
+                  screens back by the time anyone reaches this button. */}
+              {senders.length > 1 && (
+                <div>
+                  <label style={labelStyle}>
+                    Send from <span style={{ color: "var(--admin-text-faint)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(which verified address this goes out as)</span>
+                  </label>
+                  <select
+                    style={inputStyle}
+                    value={senderEmail}
+                    onChange={(e) => setSenderEmail(e.target.value)}
+                  >
+                    <option value="">Default sender</option>
+                    {senders.map((s) => (
+                      <option key={s.email} value={s.email}>
+                        {s.name ? `${s.name} <${s.email}>` : s.email}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {senderError && (
+                <p className="text-xs" style={{ color: "var(--admin-text-muted)" }}>
+                  {senderError} Sending as the default address.
+                </p>
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <button
