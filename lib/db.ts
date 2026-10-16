@@ -219,6 +219,40 @@ function bootstrap(db: Client): void {
     // etc. `secret_enc` is AES-256-GCM ciphertext (lib/crypto.ts, keyed by
     // TOKEN_ENCRYPTION_KEY) — never plaintext at rest, and never included in a
     // list response; only GET /api/vault/[id]/reveal decrypts it, on demand.
+    /* Mailboxes campaigns can be sent through instead of Brevo.
+     *
+     * The point is a campaign that arrives from a person rather than a
+     * noreply address, with replies landing in a real inbox. The trade is
+     * volume: a provider mailbox is rate limited in a way an ESP is not, so
+     * daily_limit is stored per account and enforced rather than left for
+     * the provider to enforce by locking the account mid-campaign.
+     *
+     * The password is AES-256-GCM via lib/crypto, same as vault_entries, and
+     * is never returned by the list endpoint. An app password, not the
+     * account password, is what belongs here. */
+    `CREATE TABLE IF NOT EXISTS smtp_accounts (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      label         TEXT NOT NULL,
+      host          TEXT NOT NULL,
+      port          INTEGER NOT NULL DEFAULT 587,
+      secure        INTEGER NOT NULL DEFAULT 0,
+      username      TEXT NOT NULL,
+      password_enc  TEXT NOT NULL,
+      from_email    TEXT NOT NULL,
+      from_name     TEXT NOT NULL DEFAULT '',
+      daily_limit   INTEGER NOT NULL DEFAULT 400,
+      created_at    INTEGER NOT NULL DEFAULT (unixepoch())
+    )`,
+    /* One row per message accepted by an SMTP account, so the daily limit is
+       counted from what was actually sent rather than from a counter that a
+       restart or a parallel send would lose. */
+    `CREATE TABLE IF NOT EXISTS smtp_send_log (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id INTEGER NOT NULL,
+      email      TEXT NOT NULL,
+      sent_at    INTEGER NOT NULL DEFAULT (unixepoch())
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_smtp_send_log_account ON smtp_send_log(account_id, sent_at)`,
     `CREATE TABLE IF NOT EXISTS vault_entries (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
       label       TEXT NOT NULL,

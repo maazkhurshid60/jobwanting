@@ -1,5 +1,6 @@
 import db from "@/lib/db";
 import { sendCampaignEmail, getBouncedEmails } from "@/lib/brevo";
+import { sendViaSmtp } from "@/lib/smtp";
 import fs from "fs";
 import path from "path";
 
@@ -121,6 +122,10 @@ export interface CampaignSendParams {
      senderRotateEvery emails. */
   senderEmails?: { email: string; name?: string }[] | null;
   senderRotateEvery?: number | null;
+  /* Send through a configured mailbox rather than Brevo. Wins over every
+     sender option above, because with SMTP the From address is the mailbox
+     being authenticated to and cannot be chosen per message. */
+  smtpAccountId?: number | null;
 }
 
 export interface CampaignSendResult {
@@ -161,7 +166,7 @@ export async function sendCampaignNow(params: CampaignSendParams): Promise<Campa
   const {
     subject, body, isHtml, listId, excludeRecentDays, dailyLimit, offset,
     replyTo, attachPostcard, customAttachment, senderEmail, senderName,
-    senderEmails, senderRotateEvery,
+    senderEmails, senderRotateEvery, smtpAccountId,
   } = params;
 
   /* A rotation of one is just a single sender, so it collapses rather than
@@ -270,23 +275,37 @@ export async function sendCampaignNow(params: CampaignSendParams): Promise<Campa
 
   let result;
   try {
-    result = await sendCampaignEmail({
-      subject,
-      htmlContent: body,
-      replyTo: replyTo ?? undefined,
-      ...senderOpts,
-      attachments: attachmentsOption,
-      recipients: contacts.map((c) => {
-        const personalizedText = personalize(body, c);
-        const wrappedHtml = wrapInHtmlTemplate(personalizedText, c.email as string, campaignId, !!isHtml);
-        return {
-          email: c.email as string,
-          name: (c.name as string) || undefined,
-          personalizedHtml: wrappedHtml,
-          personalizedSubject: personalize(subject, c),
-        };
-      }),
+    const recipients = contacts.map((c) => {
+      const personalizedText = personalize(body, c);
+      const wrappedHtml = wrapInHtmlTemplate(personalizedText, c.email as string, campaignId, !!isHtml);
+      return {
+        email: c.email as string,
+        name: (c.name as string) || undefined,
+        personalizedHtml: wrappedHtml,
+        personalizedSubject: personalize(subject, c),
+      };
     });
+
+    /* Either transport, same result shape, so everything below this — the
+       recipient rows, the send log, the failure counts — is unchanged. The
+       sender options are dropped on the SMTP path rather than passed and
+       ignored: with SMTP the From is the mailbox being authenticated to. */
+    result = smtpAccountId
+      ? await sendViaSmtp(smtpAccountId, {
+          subject,
+          htmlContent: body,
+          replyTo: replyTo ?? undefined,
+          attachments: attachmentsOption,
+          recipients,
+        })
+      : await sendCampaignEmail({
+          subject,
+          htmlContent: body,
+          replyTo: replyTo ?? undefined,
+          ...senderOpts,
+          attachments: attachmentsOption,
+          recipients,
+        });
   } catch (err) {
     await db.execute({ sql: "UPDATE campaigns SET status = 'failed' WHERE id = ?", args: [campaignId] });
     const message = err instanceof Error ? err.message : "Send failed";
@@ -326,7 +345,25 @@ export async function sendCampaignNow(params: CampaignSendParams): Promise<Campa
       const sample = contacts[0];
       const verifierSubject = `[CAMPAIGN COPY] ${personalize(subject, sample)}`;
       const verifierBodyText = personalize(body, sample);
-      await sendCampaignEmail({
+      /* On the SMTP path the copy goes through the same mailbox, so it shows
+         the From address and signing the recipients actually saw. It costs a
+         slot against that mailbox's daily limit, which is the right trade
+         for a copy whose whole purpose is to be representative. */
+      if (smtpAccountId) {
+        await sendViaSmtp(smtpAccountId, {
+          subject: verifierSubject,
+          htmlContent: wrapInHtmlTemplate(verifierBodyText, VERIFIER_EMAILS[0], 0, !!isHtml),
+          replyTo: replyTo ?? undefined,
+          attachments: attachmentsOption,
+          recipients: VERIFIER_EMAILS.map((e) => ({
+            email: e,
+            name: "Campaign Verifier",
+            personalizedHtml: wrapInHtmlTemplate(verifierBodyText, e, 0, !!isHtml),
+            personalizedSubject: verifierSubject,
+          })),
+        });
+      } else {
+        await sendCampaignEmail({
         subject: verifierSubject,
         htmlContent: wrapInHtmlTemplate(verifierBodyText, VERIFIER_EMAILS[0], 0, !!isHtml),
         replyTo: replyTo ?? undefined,
@@ -340,9 +377,10 @@ export async function sendCampaignNow(params: CampaignSendParams): Promise<Campa
           email: e,
           name: "Campaign Verifier",
           personalizedHtml: wrapInHtmlTemplate(verifierBodyText, e, 0, !!isHtml),
-          personalizedSubject: verifierSubject,
-        })),
-      });
+            personalizedSubject: verifierSubject,
+          })),
+        });
+      }
     } catch (err) {
       console.error("Verifier copy failed (non-fatal):", err);
     }

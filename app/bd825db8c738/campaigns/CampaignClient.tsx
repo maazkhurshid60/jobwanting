@@ -18,6 +18,16 @@ const STEPS = [
   { n: 6, label: "Schedule" },
 ] as const;
 
+interface SmtpAccount {
+  id: number;
+  label: string;
+  fromEmail: string;
+  fromName: string;
+  dailyLimit: number;
+  host: string;
+  port: number;
+}
+
 interface Campaign {
   id: number;
   subject: string;
@@ -148,6 +158,17 @@ export default function CampaignClient({
   const [rotateSenders, setRotateSenders] = useState(false);
   const [rotationEmails, setRotationEmails] = useState<string[]>([]);
   const [rotateEvery, setRotateEvery] = useState(1);
+  /* Mailboxes the campaign can go through instead of Brevo. null means
+     Brevo, which stays the default: it is the transport with the volume. */
+  const [mailboxes, setMailboxes] = useState<SmtpAccount[]>([]);
+  const [smtpAccountId, setSmtpAccountId] = useState<number | null>(null);
+  const [showAddMailbox, setShowAddMailbox] = useState(false);
+  const [mailboxForm, setMailboxForm] = useState({
+    label: "", host: "", port: 587, username: "", password: "",
+    fromEmail: "", fromName: "", dailyLimit: 400,
+  });
+  const [mailboxBusy, setMailboxBusy] = useState(false);
+  const [mailboxMsg, setMailboxMsg] = useState<string | null>(null);
   const [isTestSend, setIsTestSend] = useState(false);
   const [testEmail, setTestEmail] = useState("");
   const [loading, setLoading] = useState(false);
@@ -270,6 +291,7 @@ export default function CampaignClient({
      than leaving an unexplained one-item dropdown. */
   useEffect(() => {
     let cancelled = false;
+    loadMailboxes();
     fetch("/api/senders")
       .then(async (res) => {
         const data = await res.json().catch(() => ({}));
@@ -398,6 +420,7 @@ export default function CampaignClient({
           senderEmails:
             rotateSenders && rotationEmails.length > 1 ? rotationEmails : null,
           senderRotateEvery: rotateEvery,
+          smtpAccountId,
           isTestSend,
           testEmail: isTestSend ? testEmail.trim() : null,
           customAttachment: customAttachment ? { name: customAttachment.name, content: customAttachment.content } : null,
@@ -448,16 +471,177 @@ export default function CampaignClient({
     );
   }
 
+  async function loadMailboxes() {
+    try {
+      const res = await fetch("/api/smtp-accounts");
+      const data = await res.json();
+      if (res.ok) setMailboxes(data.accounts ?? []);
+    } catch { /* a missing list just means Brevo only */ }
+  }
+
+  async function saveMailbox() {
+    setMailboxBusy(true);
+    setMailboxMsg(null);
+    try {
+      const res = await fetch("/api/smtp-accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mailboxForm),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setMailboxMsg(data.error ?? "Could not save the mailbox.");
+        return;
+      }
+      /* Saved-but-unverified is reported rather than hidden: the settings
+         are kept so they can be corrected, but a mailbox that cannot log in
+         will fail every recipient at send time. */
+      setMailboxMsg(data.warning ?? "Mailbox saved and the connection works.");
+      if (!data.warning) {
+        setShowAddMailbox(false);
+        setSmtpAccountId(data.id);
+      }
+      await loadMailboxes();
+    } catch {
+      setMailboxMsg("Could not reach the server.");
+    } finally {
+      setMailboxBusy(false);
+    }
+  }
+
+  function mailboxPicker() {
+    const chosen = mailboxes.find((m) => m.id === smtpAccountId) ?? null;
+    return (
+      <div className="flex flex-col gap-3">
+        <div>
+          <label style={labelStyle}>
+            Send through <span style={{ color: "var(--admin-text-faint)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(Brevo, or one of your own mailboxes)</span>
+          </label>
+          <select
+            style={inputStyle}
+            value={smtpAccountId ?? ""}
+            onChange={(e) => setSmtpAccountId(e.target.value ? Number(e.target.value) : null)}
+          >
+            <option value="">Brevo (bulk sending)</option>
+            {mailboxes.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label} — {m.fromEmail}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {chosen && (
+          <div className="p-3 rounded-xl text-xs flex flex-col gap-1" style={{ background: "var(--admin-surface-2)", border: "1px solid var(--admin-border)", color: "var(--admin-text-secondary)" }}>
+            <span>
+              Sending as{" "}
+              <strong className="text-(--admin-text)">
+                {chosen.fromName ? `${chosen.fromName} <${chosen.fromEmail}>` : chosen.fromEmail}
+              </strong>
+              , replies land in that inbox.
+            </span>
+            {/* The limit is the whole reason this transport is not the
+                default, so it is stated where the choice is made. */}
+            <span>
+              Capped at <strong className="text-(--admin-text)">{chosen.dailyLimit}</strong> recipients
+              per day. Anyone past the cap is recorded as not sent rather than
+              risking the provider locking the mailbox.
+            </span>
+            <span style={{ color: "var(--admin-text-muted)" }}>
+              Bounces return to the inbox as ordinary mail, so they do not feed
+              the suppression list the way Brevo&rsquo;s do.
+            </span>
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={() => setShowAddMailbox((v) => !v)}
+          className="self-start text-xs underline"
+          style={{ color: "var(--admin-accent-text)" }}
+        >
+          {showAddMailbox ? "Cancel" : "Add a mailbox"}
+        </button>
+
+        {showAddMailbox && (
+          <div className="flex flex-col gap-2 p-3 rounded-xl" style={{ background: "var(--admin-surface-2)", border: "1px solid var(--admin-border)" }}>
+            {([
+              ["label", "Name, e.g. Patrick (Outlook)"],
+              ["host", "SMTP host, e.g. smtp.office365.com"],
+              ["username", "Username, usually the full address"],
+              ["password", "App password, not the account password"],
+              ["fromEmail", "From address"],
+              ["fromName", "From name (optional)"],
+            ] as const).map(([key, placeholder]) => (
+              <input
+                key={key}
+                style={inputStyle}
+                type={key === "password" ? "password" : "text"}
+                placeholder={placeholder}
+                value={mailboxForm[key] as string}
+                onChange={(e) => setMailboxForm((f) => ({ ...f, [key]: e.target.value }))}
+              />
+            ))}
+            <div className="flex gap-2">
+              <input
+                style={{ ...inputStyle, width: 110 }}
+                type="number"
+                placeholder="Port"
+                value={mailboxForm.port}
+                onChange={(e) => setMailboxForm((f) => ({ ...f, port: Number(e.target.value) || 587 }))}
+              />
+              <input
+                style={{ ...inputStyle, width: 150 }}
+                type="number"
+                placeholder="Daily limit"
+                value={mailboxForm.dailyLimit}
+                onChange={(e) => setMailboxForm((f) => ({ ...f, dailyLimit: Number(e.target.value) || 400 }))}
+              />
+            </div>
+            <p className="text-[11px]" style={{ color: "var(--admin-text-muted)" }}>
+              Use an app password. Gmail and Outlook both refuse a normal
+              password once two-factor is on, and an app password can be
+              revoked without changing the account login.
+            </p>
+            <button
+              type="button"
+              disabled={mailboxBusy}
+              onClick={saveMailbox}
+              className="self-start px-4 py-2 rounded-full text-xs font-bold text-white disabled:opacity-50"
+              style={{ background: "var(--admin-accent)" }}
+            >
+              {mailboxBusy ? "Testing the connection…" : "Save and test"}
+            </button>
+            {mailboxMsg && (
+              <p className="text-xs" style={{ color: "var(--admin-text-secondary)" }}>{mailboxMsg}</p>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   function senderPicker() {
+    /* With a mailbox chosen the Brevo sender controls do not apply: the From
+       address is the mailbox being authenticated to and cannot be set per
+       message. Hiding them beats showing controls that silently do nothing. */
+    if (smtpAccountId) return mailboxPicker();
+
     if (senders.length <= 1) {
-      return senderError ? (
-        <p className="text-xs" style={{ color: "var(--admin-text-muted)" }}>
-          {senderError} Sending as the default address.
-        </p>
-      ) : null;
+      return (
+        <div className="flex flex-col gap-3">
+          {mailboxPicker()}
+          {senderError && (
+            <p className="text-xs" style={{ color: "var(--admin-text-muted)" }}>
+              {senderError} Sending as the default address.
+            </p>
+          )}
+        </div>
+      );
     }
     return (
       <div className="flex flex-col gap-3">
+        {mailboxPicker()}
         <div>
           <label style={labelStyle}>
             Send from <span style={{ color: "var(--admin-text-faint)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>(which verified address this goes out as)</span>
@@ -1235,7 +1419,14 @@ export default function CampaignClient({
                   <strong className="text-(--admin-text)">{sendCount}</strong> recipient{sendCount !== 1 ? "s" : ""} · subject &ldquo;{subject.trim() || "—"}&rdquo;
                 </p>
                 <p className="text-sm" style={{ color: "var(--admin-text-secondary)" }}>
-                  {rotateSenders && rotationEmails.length > 1 ? (
+                  {smtpAccountId ? (
+                    <>
+                      Through{" "}
+                      <strong className="text-(--admin-text)">
+                        {mailboxes.find((m) => m.id === smtpAccountId)?.fromEmail ?? "a mailbox"}
+                      </strong>
+                    </>
+                  ) : rotateSenders && rotationEmails.length > 1 ? (
                     <>
                       Rotating{" "}
                       <strong className="text-(--admin-text)">
@@ -1259,7 +1450,7 @@ export default function CampaignClient({
                     {replyTo.trim() || "patrick@metroassoc.com"}
                   </strong>
                 </p>
-                {rotateSenders && rotationEmails.length > 1 && (
+                {!smtpAccountId && rotateSenders && rotationEmails.length > 1 && (
                   <p className="text-xs" style={{ color: "var(--admin-text-muted)" }}>
                     {rotationEmails.join(" → ")} → repeat
                   </p>

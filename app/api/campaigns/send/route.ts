@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 import { sendCampaignEmail, resolveSender, resolveSenders } from "@/lib/brevo";
+import { sendViaSmtp } from "@/lib/smtp";
 import {
   personalize,
   wrapInHtmlTemplate,
@@ -23,6 +24,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     testEmail?: string | null;
     senderEmails?: string[] | null;
   };
+
+  /* A test send through a mailbox goes through the same transport as the
+     real thing, so it proves the credentials and shows the actual From
+     address. Declared here because the test-send branch below returns
+     before the main send path is reached. */
+  const smtpAccountId = payload.smtpAccountId ?? null;
   const {
     subject, body, isHtml, replyTo, isTestSend, testEmail,
     attachPostcard, customAttachment,
@@ -64,17 +71,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const personalizedSubject = `[TEST] ${personalize(subject, testContact)}`;
       const wrappedHtml = wrapInHtmlTemplate(personalizedBody, testEmail.trim(), 0, !!isHtml);
 
-      const result = await sendCampaignEmail({
-        subject: personalizedSubject,
-        htmlContent: wrappedHtml,
-        replyTo: replyTo ?? undefined,
-        /* A test send is one email, so a rotation has nothing to rotate
-           through: it goes out as the first address, which is what the real
-           campaign's first email will use. */
-        sender: rotation.length ? rotation[0] : sender,
-        attachments: attachmentsOption,
-        recipients: [{ email: testEmail.trim(), name: "Test Recipient", personalizedHtml: wrappedHtml }],
-      });
+      const testRecipients = [
+        { email: testEmail.trim(), name: "Test Recipient", personalizedHtml: wrappedHtml },
+      ];
+      const result = smtpAccountId
+        ? await sendViaSmtp(smtpAccountId, {
+            subject: personalizedSubject,
+            htmlContent: wrappedHtml,
+            replyTo: replyTo ?? undefined,
+            attachments: attachmentsOption,
+            recipients: testRecipients,
+          })
+        : await sendCampaignEmail({
+            subject: personalizedSubject,
+            htmlContent: wrappedHtml,
+            replyTo: replyTo ?? undefined,
+            /* A test send is one email, so a rotation has nothing to rotate
+               through: it goes out as the first address, which is what the
+               real campaign's first email will use. */
+            sender: rotation.length ? rotation[0] : sender,
+            attachments: attachmentsOption,
+            recipients: testRecipients,
+          });
       if (result.sent.length === 0) {
         const reason = result.failed[0]?.error ?? "Send failed";
         return NextResponse.json({ error: `Test send failed: ${reason}` }, { status: 500 });
@@ -95,6 +113,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     senderName: sender?.name ?? null,
     senderEmails: rotation.length ? rotation : null,
     senderRotateEvery: payload.senderRotateEvery ?? 1,
+    smtpAccountId: payload.smtpAccountId ?? null,
   });
   if (!result.ok) {
     const status = result.error === "No eligible contacts to send to" ? 400 : 500;
