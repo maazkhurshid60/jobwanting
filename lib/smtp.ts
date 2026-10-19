@@ -116,6 +116,16 @@ export async function deleteSmtpAccount(id: number): Promise<void> {
   await db.execute({ sql: "DELETE FROM smtp_accounts WHERE id = ?", args: [id] });
 }
 
+/** One mailbox by id, without its password, or null if there is no such row.
+ *  Exists so a caller can confirm a mailbox is still configured before
+ *  committing to send through it later — a scheduled campaign naming a
+ *  mailbox that has since been deleted should fail while someone is looking
+ *  at the form, not silently at 09:00 on the day. */
+export async function getSmtpAccount(id: number): Promise<SmtpAccount | null> {
+  const row = await loadRow(id);
+  return row ? toAccount(row) : null;
+}
+
 async function loadRow(id: number): Promise<AccountRow | null> {
   const res = await db.execute({
     sql: `SELECT id, label, host, port, secure, username, password_enc,

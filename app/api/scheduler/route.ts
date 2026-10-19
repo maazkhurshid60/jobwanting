@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import db from "@/lib/db";
 import { zonedWallTimeToUtcEpoch, isRepeatEvery, REPEAT_INTERVAL_DAYS } from "@/lib/schedule";
 import { resolveSender, resolveSenders } from "@/lib/brevo";
+import { getSmtpAccount } from "@/lib/smtp";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -56,6 +57,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     senderEmail?: string | null;          // null = the configured default
     senderEmails?: string[] | null;       // two or more = rotate through them
     senderRotateEvery?: number | null;    // emails per sender before switching
+    smtpAccountId?: number | null;        // send through this mailbox, not Brevo
   };
 
   if (!b.subject?.trim() || !b.body?.trim()) {
@@ -125,6 +127,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
      runs this days from now sends from names Brevo gave us. */
   const rotation = resolvedRotation.senders;
 
+  /* And the mailbox, for the same reason the senders are checked here: a
+     campaign set for next Tuesday that names a mailbox someone deletes on
+     Monday should be caught now. The worker re-reads the id from the row, so
+     a deletion in between still fails then -- but it fails loudly, where a
+     missing id would otherwise fall through to Brevo and send the campaign
+     from the wrong address entirely. */
+  let smtpAccountId: number | null = null;
+  if (b.smtpAccountId != null) {
+    const account = await getSmtpAccount(Number(b.smtpAccountId));
+    if (!account) {
+      return NextResponse.json(
+        { error: "That mailbox no longer exists. Pick another, or send through Brevo." },
+        { status: 400 },
+      );
+    }
+    smtpAccountId = account.id;
+  }
+
   const listId = b.listId ?? null;
   const totalTarget = await audienceSize(listId);
 
@@ -133,8 +153,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             (subject, body, is_html, list_id, exclude_recent_days, daily_limit,
              send_offset, reply_to, attach_postcard, scheduled_at, timezone, status,
              batch_interval_minutes, total_target, repeat_every,
-             sender_email, sender_name, sender_emails, sender_rotate_every)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+             sender_email, sender_name, sender_emails, sender_rotate_every,
+             smtp_account_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       b.subject.trim(),
       b.body,
@@ -154,6 +175,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       sender?.name ?? null,
       rotation.length ? JSON.stringify(rotation) : null,
       rotation.length ? Math.max(1, Math.floor(b.senderRotateEvery ?? 1)) : null,
+      smtpAccountId,
     ],
   });
 

@@ -42,6 +42,7 @@ interface ScheduledRow {
   sender_name: string | null;
   sender_emails: string | null;
   sender_rotate_every: number | null;
+  smtp_account_id: number | null;
 }
 
 /** The sender rotation off a scheduled row, or null if there isn't a usable
@@ -104,8 +105,9 @@ async function queueRepeat(row: ScheduledRow): Promise<number | null> {
             (subject, body, is_html, list_id, exclude_recent_days, daily_limit,
              send_offset, reply_to, attach_postcard, scheduled_at, timezone, status,
              batch_interval_minutes, total_target, repeat_every,
-             sender_email, sender_name, sender_emails, sender_rotate_every)
-          VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+             sender_email, sender_name, sender_emails, sender_rotate_every,
+             smtp_account_id)
+          VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       row.subject, row.body, row.is_html, row.list_id, row.exclude_recent_days,
       row.daily_limit, row.reply_to, row.attach_postcard, nextAt, row.timezone,
@@ -114,6 +116,9 @@ async function queueRepeat(row: ScheduledRow): Promise<number | null> {
       // scheduled with.
       row.sender_email, row.sender_name,
       row.sender_emails, row.sender_rotate_every,
+      // ...and the transport, so a recurring send does not silently move to
+      // Brevo on its second occurrence.
+      row.smtp_account_id,
     ],
   });
   return Number(res.lastInsertRowid);
@@ -128,7 +133,7 @@ async function processDue(): Promise<{ processed: number; reaped: number; result
                  daily_limit, send_offset, reply_to, attach_postcard,
                  scheduled_at, timezone, batch_interval_minutes, total_target,
                  repeat_every, recipient_count, sender_email, sender_name,
-                 sender_emails, sender_rotate_every
+                 sender_emails, sender_rotate_every, smtp_account_id
           FROM scheduled_campaigns
           WHERE status = 'pending' AND COALESCE(next_batch_at, scheduled_at) <= ?
           ORDER BY COALESCE(next_batch_at, scheduled_at) ASC
@@ -168,6 +173,13 @@ async function processDue(): Promise<{ processed: number; reaped: number; result
          not a reason to drop a scheduled campaign on the floor. */
       senderEmails: parseSenders(row.sender_emails),
       senderRotateEvery: row.sender_rotate_every,
+      /* The transport. Null means Brevo, which is what every row written
+         before this column existed holds, so those keep sending exactly as
+         they were scheduled to. A row naming a mailbox that has since been
+         deleted fails the send rather than quietly falling back to Brevo --
+         a campaign going out from the wrong address is worse than one that
+         does not go out, because nobody finds out until a reply bounces. */
+      smtpAccountId: row.smtp_account_id,
     };
 
     try {

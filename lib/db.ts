@@ -382,6 +382,11 @@ function bootstrap(db: Client): void {
       // behaviour those rows were scheduled under.
       db.execute("ALTER TABLE scheduled_campaigns ADD COLUMN sender_emails TEXT").catch(() => {}),
       db.execute("ALTER TABLE scheduled_campaigns ADD COLUMN sender_rotate_every INTEGER").catch(() => {}),
+      // Which configured mailbox (lib/smtp.ts) a scheduled campaign sends
+      // through instead of Brevo. NULL on every existing row, which the
+      // worker reads as "go out through Brevo" -- the transport those rows
+      // were scheduled under.
+      db.execute("ALTER TABLE scheduled_campaigns ADD COLUMN smtp_account_id INTEGER").catch(() => {}),
       // Template Library categories (see lib/templateCategories.ts) — distinct
       // from list_id, which scopes a template to a contact list rather than
       // classifying what kind of email it is.

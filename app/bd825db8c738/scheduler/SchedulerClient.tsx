@@ -91,6 +91,12 @@ export default function SchedulerClient({
      the configured default, which is what every existing schedule uses. */
   const [senders, setSenders] = useState<{ email: string; name: string }[]>([]);
   const [senderEmail, setSenderEmail] = useState("");
+  /* Mailboxes from lib/smtp.ts. Picking one sends the campaign through that
+     provider instead of Brevo, and its own address becomes the From -- which
+     is why choosing a mailbox hides the Brevo sender select rather than
+     sitting beside it. Null means Brevo, the pre-existing behaviour. */
+  const [mailboxes, setMailboxes] = useState<{ id: number; label: string; fromEmail: string; fromName: string; dailyLimit: number }[]>([]);
+  const [smtpAccountId, setSmtpAccountId] = useState<number | null>(null);
   const [templateId, setTemplateId] = useState<number | "">("");
 
   // schedule
@@ -205,6 +211,10 @@ export default function SchedulerClient({
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => { if (!cancelled && data) setSenders(data.senders ?? []); })
       .catch(() => {});
+    fetch("/api/smtp-accounts")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (!cancelled && data) setMailboxes(data.accounts ?? []); })
+      .catch(() => {});
     return () => { cancelled = true; };
   }, []);
 
@@ -244,6 +254,18 @@ export default function SchedulerClient({
       ? `A ${repeatEvery} repeat with a ${excludeDays}-day exclusion will exclude almost everyone once the previous run has gone out. Lower it below ${REPEAT_INTERVAL_DAYS[repeatEvery as RepeatEvery]} days, or turn it off, if this should re-reach the same list each time.`
       : null;
 
+  /* A batch larger than the mailbox's own daily ceiling. sendViaSmtp stops at
+     the limit and reports everyone past it as failed rather than sending into
+     a provider lockout, so this would go out as a half-delivered campaign.
+     Warned about rather than blocked: the ceiling is our conservative figure,
+     not the provider's, and the person may know theirs is higher. */
+  const mailboxOverBatch = (() => {
+    if (!smtpAccountId) return null;
+    const m = mailboxes.find((x) => x.id === smtpAccountId);
+    if (!m || dailyLimit <= m.dailyLimit) return null;
+    return `${m.fromEmail} is set to send at most ${m.dailyLimit} a day, but this batch is ${dailyLimit}. The rest would be recorded as failed. Lower the batch size, or raise the mailbox's limit.`;
+  })();
+
   const canContinue =
     step === 0 ? !!subject.trim() && !!body.trim() :
     step === 2 ? !!localDateTime && !repeatConflict :
@@ -268,6 +290,7 @@ export default function SchedulerClient({
           excludeRecentDays: excludeRecent ? excludeDays : null,
           replyTo: replyTo.trim() || null,
           senderEmail: senderEmail || null,
+          smtpAccountId,
           localDateTime,
           timezone,
           batchIntervalMinutes: drip ? dripMinutes : null,
@@ -420,7 +443,31 @@ export default function SchedulerClient({
                 <label style={LABEL}>Reply-to (optional)</label>
                 <input style={INPUT} value={replyTo} onChange={(e) => setReplyTo(e.target.value)} placeholder="patrick@metroassoc.com" />
               </div>
-              {senders.length > 1 && (
+              {/* Transport first, because it decides whether the Brevo sender
+                  select below means anything: on the SMTP path the From is the
+                  mailbox being authenticated to, so a Brevo sender chosen
+                  alongside it would be silently discarded. Hidden entirely
+                  when no mailbox is configured, which keeps the form as it was
+                  for anyone sending through Brevo. */}
+              {mailboxes.length > 0 && (
+                <div>
+                  <label style={LABEL}>Send through</label>
+                  <select
+                    style={INPUT}
+                    value={smtpAccountId ?? ""}
+                    onChange={(e) => setSmtpAccountId(e.target.value ? Number(e.target.value) : null)}
+                  >
+                    <option value="">Brevo (tracked, handles bounces)</option>
+                    {mailboxes.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label} &mdash; {m.fromEmail}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {!smtpAccountId && senders.length > 1 && (
                 <div>
                   <label style={LABEL}>Send from</label>
                   <select style={INPUT} value={senderEmail} onChange={(e) => setSenderEmail(e.target.value)}>
@@ -494,6 +541,14 @@ export default function SchedulerClient({
                 {repeatConflict}
               </div>
             )}
+
+            {mailboxOverBatch && (
+              <div className="flex items-start gap-2 rounded-lg px-3 py-2 text-sm"
+                style={{ background: "var(--admin-warning-soft)", color: "var(--admin-warning)" }}>
+                <AlertCircle size={15} className="shrink-0 mt-0.5" />
+                {mailboxOverBatch}
+              </div>
+            )}
           </div>
         )}
 
@@ -505,7 +560,17 @@ export default function SchedulerClient({
               <ReviewRow label="Subject" value={subject || "—"} />
               <ReviewRow label="Batch size" value={String(dailyLimit)} />
               {sendOffset > 0 && <ReviewRow label="Skip first" value={String(sendOffset)} />}
-              {senderEmail && <ReviewRow label="Send from" value={senderEmail} />}
+              {smtpAccountId ? (
+                <ReviewRow
+                  label="Send through"
+                  value={(() => {
+                    const m = mailboxes.find((x) => x.id === smtpAccountId);
+                    return m ? `${m.fromEmail} (up to ${m.dailyLimit}/day)` : "a mailbox";
+                  })()}
+                />
+              ) : (
+                senderEmail && <ReviewRow label="Send from" value={senderEmail} />
+              )}
               {replyTo && <ReviewRow label="Reply-to" value={replyTo} />}
               {excludeRecent && <ReviewRow label="Exclude recent" value={`Emailed in last ${excludeDays} days`} />}
               <ReviewRow
